@@ -1,12 +1,7 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from google.cloud import storage
 
-from main_service import (
-    NAS_BUCKET,
-    get_user_doc,
-    get_logger,
-    get_request_json,
-)
+from main_service import NAS_BUCKET, get_user_doc, get_logger, get_request_json
 from main_service.helpers import create_signed_gcs_urls, Logger
 
 
@@ -22,7 +17,7 @@ def create_upload_urls(
     filepaths = request_json["remote_filepaths"]
     filepaths_are_absolute = all([fp.startswith("/") for fp in filepaths])
     if not filepaths_are_absolute:
-        logger.log(f"Tell this person paths must be absolute?", tell_slack=True)
+        logger.log(f"Tell this person paths must be absolute?")
         HTTPException(400, detail="paths must be absolute")
 
     email = user_doc.get("email").replace("@", "_at_")

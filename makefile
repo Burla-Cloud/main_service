@@ -10,7 +10,8 @@ service:
 	poetry run uvicorn main_service:application --host 0.0.0.0 --port 5001 --reload
 
 restart_test_cluster:
-	curl -X POST -H "Authorization:Bearer <token>" http://127.0.0.1:5001/force_restart_cluster
+	AUTH_HEADER="Authorization:Bearer $${MAIN_SERVICE_API_KEY}"; \
+	curl -X POST -H "$${AUTH_HEADER}" http://127.0.0.1:5001/force_restart_cluster
 
 test_node:
 	poetry run python -c "from main_service.node import Node; Node.start('n1-standard-96')"
@@ -19,15 +20,15 @@ deploy-test:
 	set -e; \
 	IMAGE_TAG=$$( \
 		gcloud artifacts tags list \
-			--package=burla-webservice \
+			--package=burla-main-service \
 			--location=us \
-			--repository=burla-webservice \
+			--repository=burla-main-service \
 			2>&1 | grep -Eo '^[0-9]+' | sort -n | tail -n 1 \
 	); \
 	IMAGE_NAME=$$( echo \
-		us-docker.pkg.dev/burla-test/burla-webservice/burla-webservice:$${IMAGE_TAG} \
+		us-docker.pkg.dev/burla-test/burla-main-service/burla-main-service:$${IMAGE_TAG} \
 	); \
-	gcloud run deploy burla-webservice \
+	gcloud run deploy burla-main-service \
 	--image=$${IMAGE_NAME} \
 	--project burla-test \
 	--region=us-central1 \
@@ -40,19 +41,19 @@ deploy-test:
 	--concurrency 10 \
 	--allow-unauthenticated
 
-deploy-prod:
+deploy-test-image-to-prod:
 	set -e; \
 	IMAGE_TAG=$$( \
 		gcloud artifacts tags list \
-			--package=burla-webservice \
+			--package=burla-main-service \
 			--location=us \
-			--repository=burla-webservice \
+			--repository=burla-main-service \
 			2>&1 | grep -Eo '^[0-9]+' | sort -n | tail -n 1 \
 	); \
 	IMAGE_NAME=$$( echo \
-		us-docker.pkg.dev/burla-test/burla-webservice/burla-webservice:$${IMAGE_TAG} \
+		us-docker.pkg.dev/burla-test/burla-main-service/burla-main-service:$${IMAGE_TAG} \
 	); \
-	gcloud run deploy burla-webservice-0-7-0 \
+	gcloud run deploy burla-main-service-0-1-0 \
 	--image=$${IMAGE_NAME} \
 	--project burla-prod \
 	--region=us-central1 \
@@ -68,14 +69,14 @@ image:
 	set -e; \
 	IMAGE_TAG=$$( \
 		gcloud artifacts tags list \
-			--package=burla-webservice \
+			--package=burla-main-service \
 			--location=us \
-			--repository=burla-webservice \
+			--repository=burla-main-service \
 			2>&1 | grep -Eo '^[0-9]+' | sort -n | tail -n 1 \
 	); \
 	NEW_IMAGE_TAG=$$(($${IMAGE_TAG} + 1)); \
 	IMAGE_NAME=$$( echo \
-		us-docker.pkg.dev/burla-test/burla-webservice/burla-webservice:$${NEW_IMAGE_TAG} \
+		us-docker.pkg.dev/burla-test/burla-main-service/burla-main-service:$${NEW_IMAGE_TAG} \
 	); \
 	gcloud builds submit --tag $${IMAGE_NAME}; \
 	echo "Successfully built Docker Image:"; \
@@ -86,13 +87,13 @@ container:
 	set -e; \
 	IMAGE_TAG=$$( \
 		gcloud artifacts tags list \
-			--package=burla-webservice \
+			--package=burla-main-service \
 			--location=us \
-			--repository=burla-webservice \
+			--repository=burla-main-service \
 			2>&1 | grep -Eo '^[0-9]+' | sort -n | tail -n 1 \
 	); \
 	IMAGE_NAME=$$( echo \
-		us-docker.pkg.dev/burla-test/burla-webservice/burla-webservice:$${IMAGE_TAG} \
+		us-docker.pkg.dev/burla-test/burla-main-service/burla-main-service:$${IMAGE_TAG} \
 	); \
 	docker run --rm -it \
 		-v $(PWD):/home/pkg_dev/app \

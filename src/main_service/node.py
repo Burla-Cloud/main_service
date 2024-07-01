@@ -34,6 +34,7 @@ apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docke
 
 import os
 import requests
+from dataclasses import dataclass, asdict
 from requests.exceptions import ConnectionError, ConnectTimeout, Timeout
 from time import sleep, time
 from uuid import uuid4
@@ -58,7 +59,26 @@ from google.cloud.compute_v1 import (
 )
 
 from main_service import PROJECT_ID, TZ
-from main_service.helpers import get_secret, Logger
+from main_service.helpers import get_secret, Logger, add_logged_background_task
+
+
+@dataclass
+class Container:
+    image: int
+    python_executable: str
+    python_version: str
+
+    @classmethod
+    def from_dict(cls, _dict: dict):
+        return cls(
+            image=_dict["image"],
+            python_executable=_dict["python_executable"],
+            python_version=_dict["python_version"],
+        )
+
+    def to_dict(self):
+        return asdict(self)
+
 
 # This was guessed
 TOTAL_BOOT_TIME = timedelta(seconds=60 * 4)
@@ -70,7 +90,7 @@ GCE_DEFAULT_SVC = "140225958505-compute@developer.gserviceaccount.com"
 NODE_START_TIMEOUT = 60 * 5
 NODE_SVC_PORT = "8080"
 ACCEPTABLE_ZONES = ["us-central1-a", "us-central1-b", "us-central1-c", "us-central1-f"]
-NODE_SVC_VERSION = "v0.1.37"  # <- this maps to a git tag /  github release
+NODE_SVC_VERSION = "test"  # "v0.1.37"  # <- this maps to a git tag /  github release
 NODE_STARTUP_SCRIPT = f"""
 #! /bin/bash
 # This script installs and starts the node service 
@@ -91,8 +111,8 @@ ssh-add /root/.ssh/id_rsa
 rm -rf node_service
 
 export GIT_SSH_COMMAND="ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no"
-# git clone --depth 1 --branch {NODE_SVC_VERSION} git@github.com:Burla-Cloud/node_service.git
-git clone --depth 1 git@github.com:Burla-Cloud/node_service.git
+git clone --depth 1 --branch {NODE_SVC_VERSION} git@github.com:Burla-Cloud/node_service.git
+# git clone --depth 1 git@github.com:Burla-Cloud/node_service.git
 cd node_service
 python3.11 -m pip install --break-system-packages .
 
@@ -122,13 +142,17 @@ class Node:
         instance_name: str,
         machine_type: str,
         started_booting_at: datetime,
+        containers: Optional[list[Container]] = None,
         finished_booting_at: Optional[datetime] = None,
-        delete_when_done: bool = False,
         host: Optional[str] = None,
         zone: Optional[str] = None,
         current_job: Optional[str] = None,
         parallelism: Optional[int] = None,
         instance_client: Optional[InstancesClient] = None,
+        delete_when_done: bool = False,
+        is_deleting=False,
+        is_rebooting=False,
+        is_booting=False,
     ):
         self = cls.__new__(cls)
         self.db = db
@@ -136,16 +160,19 @@ class Node:
         self.background_tasks = background_tasks
         self.instance_name = instance_name
         self.machine_type = machine_type
+        self.containers = containers
         self.started_booting_at = started_booting_at
         self.finished_booting_at = finished_booting_at
-        self.delete_when_done = delete_when_done
         self.host = host
         self.zone = zone
         self.current_job = current_job
         self.parallelism = parallelism
         self.instance_client = instance_client if instance_client else InstancesClient()
+        self.delete_when_done = delete_when_done
+        self.is_deleting = is_deleting
+        self.is_rebooting = is_rebooting
+        self.is_booting = is_booting
         self._deleted = False
-        self.is_deleting = False
         return self
 
     @classmethod
@@ -157,15 +184,19 @@ class Node:
         instance_name: str,
         machine_type: str,
         delete_when_done: bool,
-        started_booting_at: Optional[datetime] = None,  # time NODE started booting, NOT VM
-        finished_booting_at: Optional[datetime] = None,  # time NODE finished booting, NOT VM
+        containers: Optional[list[Container]] = None,
+        started_booting_at: Optional[datetime] = None,  # time NODE (NOT VM) started booting
+        finished_booting_at: Optional[datetime] = None,  # time NODE (NOT VM) finished booting
         host: Optional[str] = None,
         zone: Optional[str] = None,
         current_job: Optional[str] = None,
         parallelism: Optional[int] = None,
         instance_client: Optional[InstancesClient] = None,
+        is_deleting=None,
+        is_rebooting=None,
+        is_booting=None,
     ):
-        if finished_booting_at == None and (not host or not zone):
+        if (finished_booting_at is not None) and (not host or not zone):
             raise ValueError("host and zone required for running nodes")
 
         return cls._init(
@@ -174,6 +205,7 @@ class Node:
             background_tasks=background_tasks,
             instance_name=instance_name,
             machine_type=machine_type,
+            containers=containers,
             started_booting_at=started_booting_at,
             finished_booting_at=finished_booting_at,
             delete_when_done=delete_when_done,
@@ -182,6 +214,9 @@ class Node:
             current_job=current_job,
             parallelism=parallelism,
             instance_client=instance_client,
+            is_deleting=is_deleting,
+            is_rebooting=is_rebooting,
+            is_booting=is_booting,
         )
 
     @classmethod
@@ -193,6 +228,7 @@ class Node:
         machine_type: str,
         job_id: str,
         parallelism: int,
+        containers: Optional[list[Container]] = None,
         delete_when_done: bool = False,
         disk_image: str = "global/images/burla-cluster-node-image-4",
         disk_size: int = 1000,  # <- (Gigabytes) minimum is 1000 due to disk image
@@ -201,8 +237,6 @@ class Node:
         """
         TODO: Node should only start the exact containers it needs in this situation instead
         of all of them. This will dramatically cut startup time.
-        TODO: Start instance of every container, not for each CPU ?? then parallelize inside single
-        container with multiprocessing? (is shared filesystem between inputs a problem?)
         """
         self = cls._init(
             db=db,
@@ -210,6 +244,7 @@ class Node:
             background_tasks=background_tasks,
             instance_name=f"burla-node-{uuid4().hex}",
             machine_type=machine_type,
+            containers=containers,
             started_booting_at=datetime.now(TZ),
             current_job=job_id,
             parallelism=parallelism,
@@ -235,6 +270,7 @@ class Node:
         logger: Logger,
         background_tasks: BackgroundTasks,
         machine_type: str,
+        containers: Optional[list[Container]] = None,
         disk_image: str = "global/images/burla-cluster-node-image-4",
         disk_size: int = 1000,  # <- (Gigabytes) minimum is 1000 due to disk image
         instance_client: Optional[InstancesClient] = None,
@@ -245,13 +281,14 @@ class Node:
             background_tasks=background_tasks,
             instance_name=f"burla-node-{uuid4().hex}",
             machine_type=machine_type,
+            containers=containers,
             started_booting_at=datetime.now(TZ),
             instance_client=instance_client,
         )
         self.is_booting = True
         msg = f"Node (NOT THE VM INSTANCE) {self.instance_name}"
         msg += f" started booting at {self.started_booting_at}"
-        self.logger.log(msg, started_booting_at=self.started_booting_at)
+        self.logger.log(msg, started_booting_at=str(self.started_booting_at))
 
         self.update_state_in_db()
         self._start(disk_image=disk_image, disk_size=disk_size)
@@ -275,7 +312,6 @@ class Node:
 
         startup_script_metadata = Items(key="startup-script", value=NODE_STARTUP_SCRIPT)
         ssh_key_metadata = Items(key="ssh-private-key", value=get_secret("deploybot-private-key"))
-
         for zone in ACCEPTABLE_ZONES:
             try:
                 instance = Instance(
@@ -294,7 +330,7 @@ class Node:
 
                 now = datetime.now(TZ)
                 msg = f"VM Instance (NOT THE NODE) {self.instance_name} started booting at {now}"
-                self.logger.log(msg, started_booting_at=now)
+                self.logger.log(msg, started_booting_at=str(now))
                 break
 
             except ServiceUnavailable:  # <- not enough instances in this zone.
@@ -308,31 +344,25 @@ class Node:
         )
         external_ip = instance.network_interfaces[0].access_configs[0].nat_i_p
 
-        # temp:
-        f"Creation timestamp for {self.instance_name}: {instance.creation_timestamp}"
-        self.logger.log(msg, creation_timestamp=instance.creation_timestamp)
-        f"Last start timestamp for {self.instance_name}: {instance.last_start_timestamp}"
-        self.logger.log(msg, last_start_timestamp=instance.last_start_timestamp)
-
         self.host = f"http://{external_ip}:{NODE_SVC_PORT}"
         self.zone = zone
 
-        # poll status until ready:
-        status = self.status(timeout=NODE_START_TIMEOUT, _ignore_booting=True)
+        status = self.status(timeout=NODE_START_TIMEOUT)  # <- won't return until service is up
         while status != "READY":
             if status == "FAILED":
                 self.delete()
                 raise Exception(f"Node {self.instance_name} Failed to start!")
-            elif status not in ["BOOTING", "REBOOTING"]:
+            elif status not in ["BOOTING", "REBOOTING", "PLEASE_REBOOT"]:
                 raise Exception(f"UNEXPECTED STATE WHILE BOOTING: {status}")
-            else:
-                sleep(5)
-                status = self.status(_ignore_booting=True)
+            elif status == "PLEASE_REBOOT":
+                self.reboot()  # <- node doesn't boot containers automatically
+            sleep(5)
+            status = self.status()
 
         self.finished_booting_at = datetime.now(TZ)
         msg = f"Node (NOT THE VM INSTANCE) {self.instance_name}"
         msg += f" finished booting at {self.finished_booting_at}"
-        self.logger.log(msg, finished_booting_at=self.finished_booting_at)
+        self.logger.log(msg, finished_booting_at=str(self.finished_booting_at))
         self.is_booting = False
         self.update_state_in_db()
 
@@ -341,28 +371,39 @@ class Node:
         ordered_collection = collection.order_by("timestamp", direction=firestore.Query.DESCENDING)
         current_cluster = ordered_collection.limit(1).get()[0].to_dict()
 
+        node_matches_self = lambda node: node["instance_name"] == self.instance_name
+        node_not_in_db = not any([node_matches_self(n) for n in current_cluster["Nodes"]])
+        node_is_deleting_or_deleted = self.is_deleting or getattr(self, "_deleted", None)
+        node_is_new = node_not_in_db and not node_is_deleting_or_deleted
+
         # remove & replace node with updated one
         for node in current_cluster["Nodes"]:
             if node["instance_name"] == self.instance_name:
                 previous_status = node["status"]
                 current_cluster["Nodes"].remove(node)
                 break
+        current_state = self.to_dict()
+        current_status = current_state["status"]
         if self._deleted == False:
+            current_cluster["Nodes"].append(current_state)
+
+        if node_is_new:
             print(f"added {self.instance_name} to db")
-            current_cluster["Nodes"].append(self.to_dict())
+            previous_status = current_status
 
         # remove & replace job with updated one
         if self.current_job != None:
-            for job in current_cluster["Jobs"]:
-                if job["job_id"] == self.current_job:
-                    current_cluster["Jobs"].remove(job)
-                    break
-            current_status = self.status()
-            if previous_status != "RUNNING" and current_status == "RUNNING":
-                job["current_parallelism"] += self.parallelism
-            elif previous_status == "RUNNING" and current_status != "RUNNING":
-                job["current_parallelism"] -= self.parallelism
-            current_cluster["Jobs"].append(job)
+            # is this job still active ?
+            matching_jobs = [j for j in current_cluster["Jobs"] if j["id"] == self.current_job]
+            job = matching_jobs[0] if matching_jobs else None
+            # if it is: update and replace
+            if job:
+                current_cluster["Jobs"].remove(job)
+                if previous_status != "RUNNING" and current_status == "RUNNING":
+                    job["current_parallelism"] += self.parallelism
+                elif previous_status == "RUNNING" and current_status != "RUNNING":
+                    job["current_parallelism"] -= self.parallelism
+                current_cluster["Jobs"].append(job)
 
         # update timestamp & save to db
         current_cluster["timestamp"] = SERVER_TIMESTAMP
@@ -377,9 +418,13 @@ class Node:
             machine_type=self.machine_type,
             current_job=self.current_job,
             parallelism=self.parallelism,
+            containers=[container.to_dict() for container in self.containers] or None,
             delete_when_done=self.delete_when_done,
             started_booting_at=self.started_booting_at,
             finished_booting_at=self.finished_booting_at,
+            is_booting=self.is_booting,
+            is_rebooting=self.is_rebooting,
+            is_deleting=self.is_deleting,
         )
 
     def execute(self, job_id: str, parallelism: int, delete_when_done: bool = False):
@@ -394,18 +439,18 @@ class Node:
         self.update_state_in_db()
 
     def reboot(self):
-        self.is_rebooting = True  # <- status returns "REBOOTING" until flipped or `_ignore_booting`
-        if self.status(_ignore_booting=True) != "REBOOTING":
-            response = requests.post(f"{self.host}/reboot")
+        if self.status() != "REBOOTING":
+            containers_json = [container.to_dict() for container in self.containers]
+            response = requests.post(f"{self.host}/reboot", json=containers_json)
             response.raise_for_status()
+            self.is_rebooting = True
 
         # confirm node is rebooting
-        status = self.status(_ignore_booting=True)
-        if not status == "REBOOTING":
+        status = self.status()
+        if status not in ["REBOOTING", "READY"]:
             raise Exception(f"Node {self.instance_name} failed start rebooting! status={status}")
 
         # poll status until done rebooting:
-        status = self.status(_ignore_booting=True)
         while status != "READY":
             if status == "FAILED":
                 self.delete()
@@ -414,11 +459,11 @@ class Node:
                 raise Exception(f"UNEXPECTED STATE WHILE REBOOTING: {status}")
             else:
                 sleep(5)
-                status = self.status(_ignore_booting=True)
+                status = self.status()
         self.is_rebooting = False
 
     def async_reboot(self):
-        self.background_tasks.add_task(self.reboot)
+        add_logged_background_task(self.background_tasks, self.logger, self.reboot)
 
     def reboot_and_execute(self, job_id: str, parallelism: int, delete_when_done: bool = False):
         if self.status() != "READY":  # <- if status is "READY" node must have already rebooted.
@@ -426,34 +471,43 @@ class Node:
         self.execute(job_id=job_id, parallelism=parallelism, delete_when_done=delete_when_done)
 
     def async_reboot_and_execute(self, *a, **kw):
-        self.background_tasks.add_task(self.reboot_and_execute, *a, **kw)
+        add_logged_background_task(
+            self.background_tasks, self.logger, self.reboot_and_execute, *a, **kw
+        )
 
-    def status(self, timeout=1, _ignore_booting=False):
+    def status(self, timeout=1, timeout_remaining=None):
         """
-        Returns one of: `BOOTING`, `REBOOTING`, `RUNNING`, `READY`, `FAILED`, `DELETING`.
+        Returns one of: `PLEASE_REBOOT`, `REBOOTING`, `RUNNING`, `READY`, `FAILED`, `DELETING`.
         """
-        # prevents other threads from discovering node is ready before node does.
-        if self.is_booting and _ignore_booting == False:
-            return "BOOTING"
-        if self.is_rebooting and _ignore_booting == False:
-            return "REBOOTING"
-        if self.is_deleting:
-            return "DELETING"
-
         start = time()
-        try:
-            response = requests.get(f"{self.host}/", timeout=1)
-            response.raise_for_status()
-            return response.json()["status"]
-        except (ConnectionError, ConnectTimeout, Timeout):
-            elapsed_time = time() - start
+        timeout_remaining = timeout if timeout_remaining is None else timeout_remaining
+        has_timed_out = timeout_remaining < 0
 
-            if elapsed_time < timeout:
-                sleep(min(10, max(0, timeout - 1)))
-                return self.status(timeout - elapsed_time, _ignore_booting=_ignore_booting)
-            else:
-                self.logger.log(f"STATUS TIMEOUT: {self.instance_name} is FAILED", severity="DEBUG")
-                return "FAILED"
+        status = None
+
+        if self.host is not None:
+            try:
+                response = requests.get(f"{self.host}/", timeout=1)
+                response.raise_for_status()
+                status = response.json()["status"]
+            except (ConnectionError, ConnectTimeout, Timeout):
+                pass
+
+        status = "BOOTING" if self.is_booting and status is None else status
+        status = "REBOOTING" if self.is_rebooting and status is None else status
+        status = "DELETING" if self.is_deleting else status
+
+        if has_timed_out:
+            # (service theoretically should have started and responded by now)
+            self.logger.log(f"STATUS TIMEOUT after {timeout}s: {self.instance_name} is FAILED")
+            status = "FAILED"
+
+        if status is None:
+            sleep(2)
+            elapsed_time = time() - start
+            return self.status(timeout=timeout, timeout_remaining=timeout_remaining - elapsed_time)
+        else:
+            return status
 
     def job_status(self, job_id: str):
         """Returns: `all_subjobs_done: bool, any_subjobs_failed: bool`"""
@@ -481,11 +535,11 @@ class Node:
             pass
 
         now = datetime.now(TZ)
-        self.logger.log(f"Node {self.instance_name} deleted at {now}", deleted_at=now)
+        self.logger.log(f"Node {self.instance_name} deleted at {now}", deleted_at=str(now))
         self._deleted = True
         self.update_state_in_db()
 
     def async_delete(self):
         self.is_deleting = True
         self.update_state_in_db()
-        self.background_tasks.add_task(self.delete)
+        add_logged_background_task(self.background_tasks, self.logger, self.delete)

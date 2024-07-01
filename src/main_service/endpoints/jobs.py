@@ -1,4 +1,6 @@
+import sys
 import pickle
+import traceback
 from time import time
 from uuid import uuid4
 
@@ -7,8 +9,8 @@ from google.cloud.firestore import FieldFilter, SERVER_TIMESTAMP
 from google.cloud.storage import Client, Blob
 
 
-from main_service import JOBS_BUCKET, JOB_ENV_REPO, DB, get_request_json, get_user_doc, get_logger
-from main_service.cluster import Cluster
+from main_service import JOBS_BUCKET, JOB_ENV_REPO, DB, get_user_doc, get_logger, get_request_json
+from main_service.cluster import Cluster, NoNodesAssignedToJob
 from main_service.env_builder import start_building_environment
 from main_service.helpers import (
     validate_create_job_request,
@@ -19,6 +21,7 @@ from main_service.helpers import (
 
 router = APIRouter()
 LOGSTREAM_BUFFER_SEC = 6
+MAX_JOB_ASSIGNMENT_DELAY_SEC = 300
 
 
 @router.post("/v1/jobs/")
@@ -27,7 +30,7 @@ def create_job(
     user_doc: dict = Depends(get_user_doc),
     logger: Logger = Depends(get_logger),
 ):
-    logger.log(f"created job with {int(request_json['n_inputs'])} input(s)", tell_slack=True)
+    logger.log(f"created job with {int(request_json['n_inputs'])} input(s)")
     validate_create_job_request(request_json)
 
     image = request_json["image"]
@@ -51,12 +54,15 @@ def create_job(
             "func_cpu": request_json["func_cpu"],
             "func_ram": request_json["func_ram"],
             "gpu": request_json["gpu"],
-            "python_version": request_json["python_version"],
             "parallelism": request_json["parallelism"],
             "user": user_doc.get("email"),
             "started_at": SERVER_TIMESTAMP,
             "burla_client_version": request_json["burla_version"],
-            "env": {"is_copied_from_client": False, "image": image},
+            "env": {
+                "is_copied_from_client": False,
+                "image": image,
+                "python_version": request_json["python_version"],
+            },
         }
     )
 
@@ -110,28 +116,38 @@ def get_job_info(
         log_docs = job_ref.collection("logs").where(filter=filter_1).where(filter=filter_2).stream()
         logs = [(log.get("epoch"), log.get("text")) for log in log_docs]
     except Exception as e:
+        exc_type, exc_value, exc_traceback = sys.exc_info()
+        traceback_details = traceback.format_exception(exc_type, exc_value, exc_traceback)
+        traceback_str = "".join(traceback_details).split("another exception occurred:")[-1]
+        msg = f"IGNORING LOG ERROR: {e}"
+        logger.log(msg, severity="ERROR", traceback=traceback_str, job_id=job_id)
         logs = [(int(time()), "ERROR: Unable to stream logs, volume is too high.")]
-        logger.log_exception(e, tell_slack=False, job_id=job_id)
 
     # udf_error ?
     sub_jobs_with_udf_error = sub_jobs_ref.where(filter=FieldFilter("udf_error", ">=", ""))
     doc_with_udf_error = next(sub_jobs_with_udf_error.limit(1).stream(), None)
     udf_error = doc_with_udf_error.to_dict()["udf_error"] if doc_with_udf_error else None
     if udf_error:
-        logger.log(f"received an error (their fault not ours) for job `{job_id}`", tell_slack=True)
+        logger.log(f"received an error (their fault not ours) for job `{job_id}`")
         return {"udf_started": udf_started, "logs": logs, "udf_error": udf_error}
 
     # install_error ?
     install_error = job.get("env", {}).get("install_error")
     if install_error:
-        logger.log(f"received install error for job `{job_id}`", tell_slack=True)
+        logger.log(f"received install error for job `{job_id}`")
         return {"udf_started": udf_started, "logs": logs, "install_error": install_error}
 
     # server error ?
     cluster = Cluster.from_database(db=DB, logger=logger, background_tasks=background_tasks)
-    server_error = cluster.status(job_id=job_id) == "FAILED"
+    try:
+        server_error = cluster.status(job_id=job_id) == "FAILED"
+        msg = f"Received a server error for job `{job_id}`!"
+    except NoNodesAssignedToJob:
+        current_job_duration = time() - job["started_at"].timestamp()
+        server_error = current_job_duration > MAX_JOB_ASSIGNMENT_DELAY_SEC
+        msg = f"ERROR: timeout, no nodes assigned to job after {MAX_JOB_ASSIGNMENT_DELAY_SEC} sec."
     if server_error:
-        logger.log(f"received an error (OUR FAULT! not theirs) for job `{job_id}`", tell_slack=True)
+        logger.log(msg)
         raise HTTPException(500)
 
     # job_succeeded ?
@@ -141,7 +157,7 @@ def get_job_info(
         output_uris = [f"gs://{JOBS_BUCKET}/{job_id}/outputs/{i}.pkl" for i in range(len(sub_jobs))]
         uris_to_urls = create_signed_gcs_urls(output_uris, method="GET")
         output_urls = [uri_to_url["url"] for uri_to_url in uris_to_urls]
-        logger.log(f"received all return values for job `{job_id}`", tell_slack=True)
+        logger.log(f"received all return values for job `{job_id}`")
         return {"udf_started": udf_started, "logs": logs, "output_urls": output_urls}
 
     # (Job still running)

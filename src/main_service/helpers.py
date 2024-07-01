@@ -1,21 +1,19 @@
-import os
 import sys
 import json
 import requests
 import traceback
-from typing import Literal, Optional
+from itertools import groupby
+from typing import Literal, Callable
 from time import sleep
 from concurrent.futures import ThreadPoolExecutor
 
-import slack_sdk
 import google
-from fastapi import Request, HTTPException
-from google.cloud import logging
+from fastapi import Request, HTTPException, BackgroundTasks
 from google.cloud import firestore
 from google.oauth2.id_token import fetch_id_token
 from google.cloud.secretmanager import SecretManagerServiceClient
 
-from main_service import PROJECT_ID, JAKE_SLACK_ID, BURLA_BACKEND_URL
+from main_service import PROJECT_ID, BURLA_BACKEND_URL, IN_DEV, GCL_CLIENT
 
 
 def get_secret(secret_name: str):
@@ -25,74 +23,84 @@ def get_secret(secret_name: str):
     return response.payload.data.decode("UTF-8")
 
 
+def format_traceback(traceback_details: list):
+    details = ["  ... (detail hidden)\n" if "/pypoetry/" in d else d for d in traceback_details]
+    details = [key for key, _ in groupby(details)]  # <- remove consecutive duplicates
+    return "".join(details).split("another exception occurred:")[-1]
+
+
 class Logger:
-    def __init__(
-        self,
-        request: Request,
-        gcl_client: logging.Client,
-        can_tell_slack: bool,
-        user_doc: Optional[dict] = {},  # <- understand implications !
-    ):
-        self.request = request
-        self.user = {"name": user_doc.get("name"), "email": user_doc.get("email")}
-        self.user_prefix = f"{self.user['name']} ({self.user['email']}) " if user_doc else ""
-        self.gcl_client = gcl_client
-        self.can_tell_slack = can_tell_slack
-        if self.can_tell_slack:
-            self.slack_token = get_secret("slackbot-token")
-        self.in_dev = os.environ.get("IN_DEV") == "True"
 
-    def _loggable_request(self):
-        return json.dumps(vars(self.request), skipkeys=True, default=lambda o: "<not serializable>")
+    def __init__(self, request: Request):
+        self.loggable_request = self.__loggable_request(request)
 
-    def _send_slack_message(self, message: str):
-        try:
-            client = slack_sdk.WebClient(token=self.slack_token)
-            client.chat_postMessage(channel="user-activity", text=message)
-        except Exception as e:
-            self.can_tell_slack = False
-            self.log_exception(e)
-            self.can_tell_slack = True
+    def __make_serializeable(self, obj):
+        """
+        Recursively traverses a nested dict swapping any:
+        - tuple -> list
+        - !dict or !list or !str -> str
+        """
+        if isinstance(obj, tuple) or isinstance(obj, list):
+            return [self.__make_serializeable(item) for item in obj]
+        elif isinstance(obj, dict):
+            return {key: self.__make_serializeable(value) for key, value in obj.items()}
+        elif not (isinstance(obj, dict) or isinstance(obj, list) or isinstance(obj, str)):
+            return str(obj)
+        else:
+            return obj
 
-    def log(
-        self,
-        msg: str,
-        tell_slack: bool = False,
-        **kw,
-    ):
-        request = self._loggable_request()
-        message = f"{self.user_prefix}{msg}"
-        struct = dict(message=message, user=self.user, request=request, **kw)
-        self.gcl_client.log_struct(struct)
-
-        if self.in_dev:
-            print(message)
-
-        if tell_slack and self.can_tell_slack:
-            self._send_slack_message(message, token=self.slack_token, gcl_client=self.gcl_client)
-
-    def log_exception(self, e: Exception, tell_slack: bool = True, **kw):
-        exc_type, exc_value, exc_traceback = sys.exc_info()
-        traceback_details = traceback.format_exception(exc_type, exc_value, exc_traceback)
-        traceback_str = "".join(traceback_details)
-
-        if tell_slack and self.can_tell_slack:
-            status_code = getattr(e, "status_code", 500)
-            path = self.request.url.path
-            job_id = path.split("job_id/")[1].split("/")[0] if "job_id" in path else "???"
-            message = f"{self.user_prefix}received error: {status_code} for job `{job_id}`!"
-            message += " " + JAKE_SLACK_ID
-            self._send_slack_message(message, token=self.slack_token, gcl_client=self.gcl_client)
-
-        struct = {
-            "severity": "ERROR",
-            "message": str(e),
-            "traceback": traceback_str,
-            "request": self._loggable_request(),
-            "user": self.user,
-            **kw,
+    def __loggable_request(self, request: Request):
+        keys = ["asgi", "client", "headers", "http_version", "method", "path", "path_params"]
+        keys.extend(["query_string", "raw_path", "root_path", "scheme", "server", "state", "type"])
+        scope = {key: request.scope.get(key) for key in keys}
+        request_dict = {
+            "scope": scope,
+            "url": str(request.url),
+            "base_url": str(request.base_url),
+            "headers": request.headers,
+            "query_params": request.query_params,
+            "path_params": request.path_params,
+            "cookies": request.cookies,
+            "client": request.client,
+            "method": request.method,
         }
-        self.gcl_client.log_struct(struct)
+        # google cloud logging won't log tuples or bytes objects.
+        return self.__make_serializeable(request_dict)
+
+    def log(self, message: str, severity="INFO", **kw):
+        if IN_DEV and "traceback" in kw.keys():
+            print(f"\nERROR: {message.strip()}\n{kw['traceback'].strip()}\n", file=sys.stderr)
+        elif IN_DEV:
+            print(message)
+        else:
+            struct = dict(message=message, request=self.loggable_request, **kw)
+            GCL_CLIENT.log_struct(struct, severity=severity)
+
+
+def add_logged_background_task(
+    background_tasks: BackgroundTasks, logger: Logger, func: Callable, *a, **kw
+):
+    """
+    Errors thrown in background tasks are completely hidden and ignored by default.
+    - BackgroundTasks class cannot be reliably monkeypatched
+    - BackgroundTasks cannot be reliably modified in middleware
+    - BackgroundTasks cannot be returned by dependencies (`fastapi.Depends`)
+    Hopefully I remember to use this function everytime I would normally call `.add_task` 😀🔫
+    """
+    tb_details = traceback.format_list(traceback.extract_stack()[:-1])
+    parent_traceback = "Traceback (most recent call last):\n" + format_traceback(tb_details)
+
+    def func_logged(*a, **kw):
+        try:
+            return func(*a, **kw)
+        except Exception as e:
+            exc_type, exc_value, exc_traceback = sys.exc_info()
+            tb_details = traceback.format_exception(exc_type, exc_value, exc_traceback)
+            local_traceback_no_title = "\n".join(format_traceback(tb_details).split("\n")[1:])
+            traceback_str = parent_traceback + local_traceback_no_title
+            logger.log(message=str(e), severity="ERROR", traceback=traceback_str)
+
+    background_tasks.add_task(func_logged, *a, **kw)
 
 
 def validate_create_job_request(request_json: dict):
