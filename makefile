@@ -13,6 +13,10 @@ restart_test_cluster:
 	AUTH_HEADER="Authorization:Bearer $${MAIN_SERVICE_API_KEY}"; \
 	curl -X POST -H "$${AUTH_HEADER}" http://127.0.0.1:5001/restart_cluster
 
+restart_prod_cluster:
+	AUTH_HEADER="Authorization:Bearer $${MAIN_SERVICE_API_KEY}"; \
+	curl -X POST -H "$${AUTH_HEADER}" -H "Content-Length: 0" https://cluster.burla.dev/restart_cluster
+
 test_node:
 	poetry run python -c "from main_service.node import Node; Node.start('n1-standard-96')"
 
@@ -53,7 +57,7 @@ deploy-test-image-to-prod:
 	IMAGE_NAME=$$( echo \
 		us-docker.pkg.dev/burla-test/burla-main-service/burla-main-service:$${IMAGE_TAG} \
 	); \
-	gcloud run deploy burla-main-service-0-1-0 \
+	gcloud run deploy burla-main-service \
 	--image=$${IMAGE_NAME} \
 	--project burla-prod \
 	--region=us-central1 \
