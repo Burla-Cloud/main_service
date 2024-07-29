@@ -10,6 +10,7 @@ from google.cloud import firestore, logging
 from fastapi.responses import Response
 from fastapi import FastAPI, Request, BackgroundTasks, Depends
 from starlette.middleware.sessions import SessionMiddleware
+from starlette.datastructures import UploadFile
 
 
 TZ = pytz.timezone("America/New_York")
@@ -37,25 +38,41 @@ from main_service.helpers import (
 
 
 async def get_request_json(request: Request):
-    return await request.json()
+    try:
+        return await request.json()
+    except:
+        form_data = await request.form()
+        return json.loads(form_data["request_json"])
+
+
+async def get_request_files(request: Request):
+    """
+    If request is multipart/form data load all files and returns as dict of {filename: bytes}
+    """
+    form_data = await request.form()
+    files = {}
+    for key, value in form_data.items():
+        if isinstance(value, UploadFile):
+            files.update({key: await value.read()})
+
+    if files:
+        return files
 
 
 def get_logger(request: Request):
     return Logger(request)
 
 
-def get_user_doc(request: Request):
-    return request.state.user_doc
+def get_user_email(request: Request):
+    return request.state.user_email
 
 
 from main_service.endpoints.jobs import router as jobs_router
-from main_service.endpoints.nas import router as nas_router
 from main_service.cluster import Cluster
 
 
 application = FastAPI(docs_url=None, redoc_url=None)
 application.include_router(jobs_router)
-application.include_router(nas_router)
 application.add_middleware(SessionMiddleware, secret_key=uuid4().hex)
 
 
@@ -65,19 +82,15 @@ def health_check():
 
 
 @application.post("/restart_cluster")
-def restart_cluster(background_tasks: BackgroundTasks, logger=Depends(get_logger)):
-    cluster = Cluster.from_database(db=DB, logger=logger, background_tasks=background_tasks)
-    cluster.restart()
-    return "Success"
-
-
-@application.post("/force_restart_cluster")
-def force_restart_cluster(
+def restart_cluster(
     background_tasks: BackgroundTasks,
     logger: Logger = Depends(get_logger),
 ):
+    start = time()
     cluster = Cluster.from_database(db=DB, logger=logger, background_tasks=background_tasks)
     cluster.restart(force=True)
+    duration = time() - start
+    logger.log(f"Restarted after {duration//60}m {duration%60}s")
     return "Success"
 
 
@@ -92,10 +105,8 @@ async def login__log_and_time_requests__log_errors(request: Request, call_next):
     request.state.uuid = uuid4().hex
 
     if request.url.path != "/":  # healthchecks shouldn't need to login
-        user_doc = validate_headers_and_login(request)
-        request.state.user_doc = user_doc
-        request.state.user_name = user_doc.get("name")
-        request.state.user_email = user_doc.get("email")
+        # user_info = validate_headers_and_login(request)
+        request.state.user_email = "jake@burla.dev"  # user_info.get("email")
 
     # If `get_logger` was a dependency this will be the second time a Logger is created.
     # This is fine because creating this object only attaches the `request` to a function.
@@ -120,11 +131,13 @@ async def login__log_and_time_requests__log_errors(request: Request, call_next):
     if not response_contains_background_tasks:
         response.background = BackgroundTasks()
 
-    message = f"Received {request.method} at {request.url}"
-    # add_logged_background_task(response.background, logger, logger.log, message)
+    if not IN_DEV:
+        msg = f"Received {request.method} at {request.url}"
+        add_logged_background_task(response.background, logger, logger.log, msg)
 
-    status = response.status_code
-    latency = time() - start
-    message = f"{request.method} to {request.url} returned {status} after {latency} seconds."
-    # add_logged_background_task(response.background, logger, logger.log, message, latency=latency)
+        status = response.status_code
+        latency = time() - start
+        msg = f"{request.method} to {request.url} returned {status} after {latency} seconds."
+        add_logged_background_task(response.background, logger, logger.log, msg, latency=latency)
+
     return response

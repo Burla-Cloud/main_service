@@ -1,16 +1,11 @@
 import sys
-import json
 import requests
 import traceback
 from itertools import groupby
-from typing import Literal, Callable
-from time import sleep
-from concurrent.futures import ThreadPoolExecutor
+from typing import Callable
+from datetime import datetime, timedelta, timezone
 
-import google
 from fastapi import Request, HTTPException, BackgroundTasks
-from google.cloud import firestore
-from google.oauth2.id_token import fetch_id_token
 from google.cloud.secretmanager import SecretManagerServiceClient
 
 from main_service import PROJECT_ID, BURLA_BACKEND_URL, IN_DEV, GCL_CLIENT
@@ -71,7 +66,8 @@ class Logger:
         if IN_DEV and "traceback" in kw.keys():
             print(f"\nERROR: {message.strip()}\n{kw['traceback'].strip()}\n", file=sys.stderr)
         elif IN_DEV:
-            print(message)
+            eastern_time = datetime.now(timezone.utc) + timedelta(hours=-4)
+            print(f"{eastern_time.strftime('%I:%M:%S.%f %p')}: {message}")
         else:
             struct = dict(message=message, request=self.loggable_request, **kw)
             GCL_CLIENT.log_struct(struct, severity=severity)
@@ -123,75 +119,3 @@ def validate_headers_and_login(request: Request):
     response = requests.get(f"{BURLA_BACKEND_URL}/v1/user/info", headers=headers)
     response.raise_for_status()
     return response.json()
-
-
-def validate_job_id(
-    job_id: str,
-    db: firestore.Client,
-    logger: Logger,
-):
-    job_ref = db.collection("jobs").document(job_id)
-    if not job_ref.get().exists:
-        logger.log("attempted to access job that does not exist?")
-        raise HTTPException(404)
-
-
-def get_oauth2_id_token(audience):
-    credentials, _ = google.auth.default()
-    session = google.auth.transport.requests.AuthorizedSession(credentials)
-    request = google.auth.transport.requests.Request(session)
-    credentials.refresh(request)
-    if hasattr(credentials, "id_token"):
-        return credentials.id_token
-    return fetch_id_token(request, audience)
-
-
-def create_signed_gcs_urls(
-    uris: list[str],
-    duration_min: int = 30,
-    method: Literal["PUT", "GET"] = "PUT",
-    content_type: str = "application/octet-stream",
-):
-    """
-    Why:
-    Blob.generate_signed_url can be really slow (~0.25s). Sometimes we need to generate millions
-    of these. 0.25s * 10^9 is a lot of time to wait.
-    What:
-    There are two cloud functions used here setup like a map-reduce.
-    CF1: `create_signed_gcs_urls`: exists because I cant get more than 30 concurrent threads
-    going for some reason when running inside this wsgi/gunicorn flask server. This first CF just
-    calls the second with a lot (thousands) of concurrent http calls.
-    CF2: `create_signed_gcs_url`: simply creates a signed gcs url from one gcs uri.
-    """
-    function_url = f"https://us-central1-{PROJECT_ID}.cloudfunctions.net/create_signed_gcs_urls"
-    svc_account_credentials = json.loads(get_secret("gcs_url_creator_svc_account"))
-    id_token = get_oauth2_id_token(audience=function_url)
-    auth_headers = {"Authorization": f"Bearer {id_token}", "Content-Type": "application/json"}
-
-    uris_per_batch = 1000  # CF takes about 3s / 1000
-    uri_batches = [uris[i : i + uris_per_batch] for i in range(0, len(uris), uris_per_batch)]
-
-    def _create_signed_gcs_urls(_uris, retries=5, backoff=0.5):
-        for i in range(retries):
-            try:
-                payload = {
-                    "uris": _uris,
-                    "duration_min": duration_min,
-                    "svc_creds": svc_account_credentials,
-                    "method": method,
-                    "content_type": content_type,
-                }
-                response = requests.post(
-                    function_url, headers=auth_headers, data=json.dumps(payload)
-                )
-                response.raise_for_status()
-                return response.json()["uris_to_urls"]
-            except:
-                if i < retries - 1:
-                    sleep(backoff * 2**i)
-                else:
-                    raise
-
-    with ThreadPoolExecutor() as executor:
-        uris_to_urls = list(executor.map(_create_signed_gcs_urls, uri_batches))
-    return [uri_to_url for uris_to_urls_sub in uris_to_urls for uri_to_url in uris_to_urls_sub]

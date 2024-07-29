@@ -7,11 +7,11 @@ test:
 	poetry run pytest -s --disable-warnings
 
 service:
-	poetry run uvicorn main_service:application --host 0.0.0.0 --port 5001 --reload
+	poetry run uvicorn main_service:application --workers 6 --host 0.0.0.0 --port 5001 --reload
 
 restart_test_cluster:
 	AUTH_HEADER="Authorization:Bearer $${MAIN_SERVICE_API_KEY}"; \
-	curl -X POST -H "$${AUTH_HEADER}" http://127.0.0.1:5001/force_restart_cluster
+	curl -X POST -H "$${AUTH_HEADER}" http://127.0.0.1:5001/restart_cluster
 
 test_node:
 	poetry run python -c "from main_service.node import Node; Node.start('n1-standard-96')"
@@ -96,6 +96,7 @@ container:
 		us-docker.pkg.dev/burla-test/burla-main-service/burla-main-service:$${IMAGE_TAG} \
 	); \
 	docker run --rm -it \
+		--name main_service \
 		-v $(PWD):/home/pkg_dev/app \
 		-v ~/.gitconfig:/home/pkg_dev/.gitconfig \
 		-v ~/.ssh/id_rsa:/home/pkg_dev/.ssh/id_rsa \
