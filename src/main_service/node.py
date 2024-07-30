@@ -113,22 +113,15 @@ def get_startup_script(instance_name: str):
     #! /bin/bash
     # This script installs and starts the node service 
     # This script uses git instead of the github api because the github api SUCKS
-
+    
     # Increases max num open files so we can have more connections open.
-    # ulimit -n 4096
-
-    # METADATA_SVC_HOST="http://metadata.google.internal"
-    # PRIVATE_KEY_URL="$METADATA_SVC_HOST/computeMetadata/v1/instance/attributes/ssh-private-key"
-    # curl $PRIVATE_KEY_URL -H "Metadata-Flavor: Google" > /root/.ssh/id_rsa
-    # chmod 600 ~/.ssh/id_rsa
-
-    # eval "$(ssh-agent -s)"
-    # ssh-add /root/.ssh/id_rsa
+    ulimit -n 4096
 
     # This needs to be here, I can't figure out how to remove it from the image.
     rm -rf node_service
 
-    # export GIT_SSH_COMMAND="ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no"
+    gcloud config set account {GCE_DEFAULT_SVC}
+
     git clone --depth 1 --branch {NODE_SVC_VERSION} git@github.com:Burla-Cloud/node_service.git
     # git clone --depth 1 git@github.com:Burla-Cloud/node_service.git
     cd node_service
