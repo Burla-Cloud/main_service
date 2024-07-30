@@ -105,7 +105,7 @@ else:
 NODE_START_TIMEOUT = 60 * 5
 NODE_SVC_PORT = "8080"
 ACCEPTABLE_ZONES = ["us-central1-a", "us-central1-b", "us-central1-c", "us-central1-f"]
-NODE_SVC_VERSION = "test"  # "v0.1.37"  # <- this maps to a git tag /  github release
+NODE_SVC_VERSION = "0.1.1-alpha"  # <- this maps to a git tag /  github release
 
 
 def get_startup_script(instance_name: str):
@@ -123,7 +123,6 @@ def get_startup_script(instance_name: str):
     gcloud config set account {GCE_DEFAULT_SVC}
 
     git clone --depth 1 --branch {NODE_SVC_VERSION} git@github.com:Burla-Cloud/node_service.git
-    # git clone --depth 1 git@github.com:Burla-Cloud/node_service.git
     cd node_service
     python3.11 -m pip install --break-system-packages .
 
