@@ -22,6 +22,7 @@ test_node:
 
 deploy-test:
 	set -e; \
+	gcloud config set project burla-test; \
 	IMAGE_TAG=$$( \
 		gcloud artifacts tags list \
 			--package=burla-main-service \
@@ -47,6 +48,7 @@ deploy-test:
 
 deploy-test-image-to-prod:
 	set -e; \
+	gcloud config set project burla-test; \
 	IMAGE_TAG=$$( \
 		gcloud artifacts tags list \
 			--package=burla-main-service \
@@ -71,6 +73,7 @@ deploy-test-image-to-prod:
 
 image:
 	set -e; \
+	gcloud config set project burla-test; \
 	IMAGE_TAG=$$( \
 		gcloud artifacts tags list \
 			--package=burla-main-service \
@@ -89,6 +92,7 @@ image:
 
 container:
 	set -e; \
+	gcloud config set project burla-test; \
 	IMAGE_TAG=$$( \
 		gcloud artifacts tags list \
 			--package=burla-main-service \

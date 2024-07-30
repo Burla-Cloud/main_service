@@ -105,8 +105,8 @@ async def login__log_and_time_requests__log_errors(request: Request, call_next):
     request.state.uuid = uuid4().hex
 
     if request.url.path != "/":  # healthchecks shouldn't need to login
-        # user_info = validate_headers_and_login(request)
-        request.state.user_email = "jake@burla.dev"  # user_info.get("email")
+        user_info = validate_headers_and_login(request)
+        request.state.user_email = user_info.get("email")
 
     # If `get_logger` was a dependency this will be the second time a Logger is created.
     # This is fine because creating this object only attaches the `request` to a function.

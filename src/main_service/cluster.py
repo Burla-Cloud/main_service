@@ -296,19 +296,19 @@ class Cluster:
                 all_done = job_status["all_subjobs_done"]
                 node_is_done = any_failed or all_done
 
-                if node_is_done and node.delete_when_done:
-                    msg = f"Deleting node {node.instance_name} because "
-                    msg += "job is done and node.delete_when_done = True"
-                    self.logger.log(msg)
-                    node.async_delete()
-                elif node_is_done:
-                    msg = f"reassigning or removing node {node.instance_name} because job {job_id} "
-                    msg += f"has no more inputs to process."
-                    self.logger.log(msg)
-                    add_logged_background_task(
-                        self.background_tasks, self.logger, self.reassign_or_remove_node, node
-                    )
-        self.logger.log(f"done getting job status")
+                # if node_is_done and node.delete_when_done:
+                #     msg = f"Deleting node {node.instance_name} because "
+                #     msg += "job is done and node.delete_when_done = True"
+                #     self.logger.log(msg)
+                #     node.async_delete()
+                # elif node_is_done:
+                #     msg = f"reassigning or removing node {node.instance_name} because job {job_id} "
+                #     msg += f"has no more inputs to process."
+                #     self.logger.log(msg)
+                #     add_logged_background_task(
+                #         self.background_tasks, self.logger, self.reassign_or_remove_node, node
+                #     )
+        # self.logger.log(f"done getting job status")
 
         if any_failed:
             return "FAILED"

@@ -204,8 +204,8 @@ def get_job_info(
         # schedule reboot of any nodes this job ran on (time sensitive)
         add_logged_background_task(background_tasks, logger, reboot_nodes_with_job, DB, job_id)
         # schedule reconcile
-        reconcile = lambda: Cluster.from_database(DB, logger, background_tasks).reconcile()
-        add_logged_background_task(background_tasks, logger, reconcile)
+        # reconcile = lambda: Cluster.from_database(DB, logger, background_tasks).reconcile()
+        # add_logged_background_task(background_tasks, logger, reconcile)
         return {"udf_started": True, "logs": logs, "done": True}
 
     cluster = Cluster.from_database(db=DB, logger=logger, background_tasks=background_tasks)
