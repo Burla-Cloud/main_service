@@ -1,17 +1,27 @@
-
 .ONESHELL:
 .SILENT:
 
+WEBSERVICE_NAME = burla-main-service
+PYTHON_MODULE_NAME = main_service
+
+ARTIFACT_REPO_NAME := $(WEBSERVICE_NAME)
+ARTIFACT_PKG_NAME := $(WEBSERVICE_NAME)
+TEST_IMAGE_BASE_NAME := us-docker.pkg.dev/burla-test/$(ARTIFACT_REPO_NAME)/$(ARTIFACT_PKG_NAME)
+PROD_IMAGE_BASE_NAME := us-docker.pkg.dev/burla-prod/$(ARTIFACT_REPO_NAME)/$(ARTIFACT_PKG_NAME)
 
 test:
 	poetry run pytest -s --disable-warnings
 
 service:
-	poetry run uvicorn main_service:application --workers 6 --host 0.0.0.0 --port 5001 --reload
+	poetry run uvicorn $(PYTHON_MODULE_NAME):application --host 0.0.0.0 --port 5001 --reload
+
+restart_dev_cluster:
+	AUTH_HEADER="Authorization:Bearer $${MAIN_SERVICE_API_KEY}"; \
+	curl -X POST -H "$${AUTH_HEADER}" http://127.0.0.1:5001/restart_cluster
 
 restart_test_cluster:
 	AUTH_HEADER="Authorization:Bearer $${MAIN_SERVICE_API_KEY}"; \
-	curl -X POST -H "$${AUTH_HEADER}" http://127.0.0.1:5001/restart_cluster
+	curl -X POST -H "$${AUTH_HEADER}" -H "Content-Length: 0" https://cluster.test.burla.dev/restart_cluster
 
 restart_prod_cluster:
 	AUTH_HEADER="Authorization:Bearer $${MAIN_SERVICE_API_KEY}"; \
@@ -22,19 +32,17 @@ test_node:
 
 deploy-test:
 	set -e; \
-	gcloud config set project burla-test; \
-	IMAGE_TAG=$$( \
+	TEST_IMAGE_TAG=$$( \
 		gcloud artifacts tags list \
-			--package=burla-main-service \
+			--package=$(ARTIFACT_PKG_NAME) \
 			--location=us \
-			--repository=burla-main-service \
+			--repository=$(ARTIFACT_REPO_NAME) \
+			--project=burla-test \
 			2>&1 | grep -Eo '^[0-9]+' | sort -n | tail -n 1 \
 	); \
-	IMAGE_NAME=$$( echo \
-		us-docker.pkg.dev/burla-test/burla-main-service/burla-main-service:$${IMAGE_TAG} \
-	); \
-	gcloud run deploy burla-main-service \
-	--image=$${IMAGE_NAME} \
+	TEST_IMAGE_NAME=$$( echo $(TEST_IMAGE_BASE_NAME):$${TEST_IMAGE_TAG} ); \
+	gcloud run deploy $(WEBSERVICE_NAME) \
+	--image=$${TEST_IMAGE_NAME} \
 	--project burla-test \
 	--region=us-central1 \
 	--set-env-vars IN_PRODUCTION=False \
@@ -42,69 +50,97 @@ deploy-test:
 	--max-instances 10 \
 	--memory 4Gi \
 	--cpu 1 \
-	--timeout 3600 \
-	--concurrency 10 \
+	--timeout 60 \
+	--concurrency 20 \
 	--allow-unauthenticated
 
-deploy-test-image-to-prod:
+move-test-image-to-prod:
 	set -e; \
-	gcloud config set project burla-test; \
-	IMAGE_TAG=$$( \
+	TEST_IMAGE_TAG=$$( \
 		gcloud artifacts tags list \
-			--package=burla-main-service \
+			--package=$(ARTIFACT_PKG_NAME) \
 			--location=us \
-			--repository=burla-main-service \
+			--repository=$(ARTIFACT_REPO_NAME) \
+			--project=burla-test \
 			2>&1 | grep -Eo '^[0-9]+' | sort -n | tail -n 1 \
 	); \
-	IMAGE_NAME=$$( echo \
-		us-docker.pkg.dev/burla-test/burla-main-service/burla-main-service:$${IMAGE_TAG} \
+	TEST_IMAGE_NAME=$$( echo $(TEST_IMAGE_BASE_NAME):$${TEST_IMAGE_TAG} ); \
+	PROD_IMAGE_TAG=$$( \
+		gcloud artifacts tags list \
+			--package=$(ARTIFACT_PKG_NAME) \
+			--location=us \
+			--repository=$(ARTIFACT_REPO_NAME) \
+			--project=burla-prod \
+			2>&1 | grep -Eo '^[0-9]+' | sort -n | tail -n 1 \
 	); \
-	gcloud run deploy burla-main-service \
-	--image=$${IMAGE_NAME} \
+	NEW_PROD_IMAGE_TAG=$$(($${PROD_IMAGE_TAG} + 1)); \
+	PROD_IMAGE_NAME=$$( echo $(PROD_IMAGE_BASE_NAME):$${NEW_PROD_IMAGE_TAG} ); \
+	docker pull $${TEST_IMAGE_NAME}; \
+	docker tag $${TEST_IMAGE_NAME} $${PROD_IMAGE_NAME}; \
+	docker push $${PROD_IMAGE_NAME}
+
+deploy-prod:
+	set -e; \
+	echo ; \
+	echo HAVE YOU MOVED THE LATEST TEST-IMAGE TO PROD?; \
+	while true; do \
+		read -p "Do you want to continue? (yes/no): " yn; \
+		case $$yn in \
+			[Yy]* ) echo "Continuing..."; break;; \
+			[Nn]* ) echo "Exiting..."; exit;; \
+			* ) echo "Please answer yes or no.";; \
+		esac; \
+	done; \
+	PROD_IMAGE_TAG=$$( \
+		gcloud artifacts tags list \
+			--package=$(ARTIFACT_PKG_NAME) \
+			--location=us \
+			--repository=$(ARTIFACT_REPO_NAME) \
+			--project burla-prod \
+			2>&1 | grep -Eo '^[0-9]+' | sort -n | tail -n 1 \
+	); \
+	PROD_IMAGE_NAME=$$( echo $(PROD_IMAGE_BASE_NAME):$${PROD_IMAGE_TAG} ); \
+	gcloud run deploy $(WEBSERVICE_NAME) \
+	--image=$${PROD_IMAGE_NAME} \
 	--project burla-prod \
 	--region=us-central1 \
 	--min-instances 1 \
 	--max-instances 20 \
 	--memory 4Gi \
 	--cpu 1 \
-	--timeout 3600 \
-	--concurrency 10 \
+	--timeout 60 \
+	--concurrency 20 \
 	--allow-unauthenticated
 
 image:
 	set -e; \
-	gcloud config set project burla-test; \
-	IMAGE_TAG=$$( \
+	TEST_IMAGE_TAG=$$( \
 		gcloud artifacts tags list \
-			--package=burla-main-service \
+			--package=$(ARTIFACT_PKG_NAME) \
 			--location=us \
-			--repository=burla-main-service \
+			--repository=$(ARTIFACT_REPO_NAME) \
+			--project burla-test \
 			2>&1 | grep -Eo '^[0-9]+' | sort -n | tail -n 1 \
 	); \
-	NEW_IMAGE_TAG=$$(($${IMAGE_TAG} + 1)); \
-	IMAGE_NAME=$$( echo \
-		us-docker.pkg.dev/burla-test/burla-main-service/burla-main-service:$${NEW_IMAGE_TAG} \
-	); \
-	gcloud builds submit --tag $${IMAGE_NAME}; \
+	NEW_TEST_IMAGE_TAG=$$(($${TEST_IMAGE_TAG} + 1)); \
+	TEST_IMAGE_NAME=$$( echo $(TEST_IMAGE_BASE_NAME):$${NEW_TEST_IMAGE_TAG} ); \
+	gcloud builds submit --tag $${TEST_IMAGE_NAME}; \
 	echo "Successfully built Docker Image:"; \
-	echo "$${IMAGE_NAME}"; \
+	echo "$${TEST_IMAGE_NAME}"; \
 	echo "";
 
 container:
 	set -e; \
-	gcloud config set project burla-test; \
-	IMAGE_TAG=$$( \
+	TEST_IMAGE_TAG=$$( \
 		gcloud artifacts tags list \
-			--package=burla-main-service \
+			--package=$(ARTIFACT_PKG_NAME) \
 			--location=us \
-			--repository=burla-main-service \
+			--repository=$(ARTIFACT_REPO_NAME) \
+			--project burla-test \
 			2>&1 | grep -Eo '^[0-9]+' | sort -n | tail -n 1 \
 	); \
-	IMAGE_NAME=$$( echo \
-		us-docker.pkg.dev/burla-test/burla-main-service/burla-main-service:$${IMAGE_TAG} \
-	); \
+	TEST_IMAGE_NAME=$$( echo $(TEST_IMAGE_BASE_NAME):$${TEST_IMAGE_TAG} ); \
 	docker run --rm -it \
-		--name main_service \
 		-v $(PWD):/home/pkg_dev/app \
 		-v ~/.gitconfig:/home/pkg_dev/.gitconfig \
 		-v ~/.ssh/id_rsa:/home/pkg_dev/.ssh/id_rsa \
@@ -113,4 +149,4 @@ container:
 		-e IN_DEV=True \
 		-e IN_PRODUCTION=False \
 		-p 5001:5001 \
-		--entrypoint poetry $${IMAGE_NAME} run bash
+		--entrypoint poetry $${TEST_IMAGE_NAME} run bash

@@ -59,7 +59,7 @@ from google.cloud.compute_v1 import (
     Instance,
 )
 
-from main_service import PROJECT_ID, TZ, IN_DEV
+from main_service import PROJECT_ID, TZ, IN_PROD
 from main_service.helpers import get_secret, Logger, add_logged_background_task
 
 
@@ -96,10 +96,10 @@ TOTAL_BOOT_TIME = timedelta(seconds=60 * 3)
 TOTAL_REBOOT_TIME = timedelta(seconds=60 * 1)
 
 # default compute engine svc account
-if IN_DEV:
-    GCE_DEFAULT_SVC = "140225958505-compute@developer.gserviceaccount.com"
-else:
+if IN_PROD:
     GCE_DEFAULT_SVC = "1057122726382-compute@developer.gserviceaccount.com"
+else:
+    GCE_DEFAULT_SVC = "140225958505-compute@developer.gserviceaccount.com"
 
 
 NODE_START_TIMEOUT = 60 * 5
@@ -126,7 +126,7 @@ def get_startup_script(instance_name: str):
     cd node_service
     python3.11 -m pip install --break-system-packages .
 
-    export IN_PRODUCTION="{os.environ.get('IN_PRODUCTION')}"
+    export IN_PRODUCTION="{IN_PROD}"
     export INSTANCE_NAME="{instance_name}"
     python3.11 -m uvicorn node_service:app --host 0.0.0.0 --port 8080 --workers 1 --timeout-keep-alive 600
     """

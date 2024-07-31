@@ -4,6 +4,7 @@ import json
 import traceback
 from uuid import uuid4
 from time import time
+from requests.exceptions import HTTPError
 
 import pytz
 from google.cloud import firestore, logging
@@ -15,14 +16,16 @@ from starlette.datastructures import UploadFile
 
 TZ = pytz.timezone("America/New_York")
 IN_DEV = os.environ.get("IN_DEV") == "True"
-PROJECT_ID = "burla-prod" if os.environ.get("IN_PRODUCTION") == "True" else "burla-test"
-JOBS_BUCKET = "burla-jobs-prod" if PROJECT_ID == "burla-prod" else "burla-jobs"
-NAS_BUCKET = "burla-nas-prod" if PROJECT_ID == "burla-prod" else "burla-nas"
+IN_PROD = os.environ.get("IN_PRODUCTION") == "True"
+PROJECT_ID = "burla-prod" if IN_PROD else "burla-test"
+JOBS_BUCKET = "burla-jobs-prod" if IN_PROD else "burla-jobs"
 JOB_ENV_REPO = f"us-docker.pkg.dev/{PROJECT_ID}/burla-job-containers/default"
 
-# BURLA_BACKEND_URL = "http://10.0.4.35:5002"
-# BURLA_BACKEND_URL = "https://backend.test.burla.dev"
-BURLA_BACKEND_URL = "https://backend.burla.dev"
+if IN_DEV:
+    # BURLA_BACKEND_URL = "http://10.0.4.35:5002"
+    BURLA_BACKEND_URL = "https://backend.test.burla.dev"
+else:
+    BURLA_BACKEND_URL = "https://backend.burla.dev"
 
 # reduces number of instances / saves across some requests as opposed to using Depends
 GCL_CLIENT = logging.Client().logger("main_service")
@@ -105,8 +108,14 @@ async def login__log_and_time_requests__log_errors(request: Request, call_next):
     request.state.uuid = uuid4().hex
 
     if request.url.path != "/":  # healthchecks shouldn't need to login
-        user_info = validate_headers_and_login(request)
-        request.state.user_email = user_info.get("email")
+        try:
+            user_info = validate_headers_and_login(request)
+            request.state.user_email = user_info.get("email")
+        except HTTPError as e:
+            if "401" in str(e):
+                return Response(status_code=401, content="Unauthorized.")
+            else:
+                raise e
 
     # If `get_logger` was a dependency this will be the second time a Logger is created.
     # This is fine because creating this object only attaches the `request` to a function.
