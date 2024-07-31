@@ -50,7 +50,7 @@ deploy-test:
 	--max-instances 10 \
 	--memory 4Gi \
 	--cpu 1 \
-	--timeout 60 \
+	--timeout 300 \
 	--concurrency 20 \
 	--allow-unauthenticated
 
@@ -108,7 +108,7 @@ deploy-prod:
 	--max-instances 20 \
 	--memory 4Gi \
 	--cpu 1 \
-	--timeout 60 \
+	--timeout 300 \
 	--concurrency 20 \
 	--allow-unauthenticated
 
