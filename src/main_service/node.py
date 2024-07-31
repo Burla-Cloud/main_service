@@ -105,7 +105,7 @@ else:
 NODE_START_TIMEOUT = 60 * 5
 NODE_SVC_PORT = "8080"
 ACCEPTABLE_ZONES = ["us-central1-a", "us-central1-b", "us-central1-c", "us-central1-f"]
-NODE_SVC_VERSION = "0.1.1-alpha"  # <- this maps to a git tag /  github release
+NODE_SVC_VERSION = "0.1.2-alpha"  # <- this maps to a git tag /  github release
 
 
 def get_startup_script(instance_name: str):

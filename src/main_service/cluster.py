@@ -263,10 +263,7 @@ class Cluster:
 
     def status(self, job_id: str):
         nodes_assigned_to_job = [node for node in self.nodes if node.current_job == job_id]
-
-        start = time()
         nodes_working_on_job = [n for n in nodes_assigned_to_job if n.status() == "RUNNING"]
-        self.logger.log(f"done getting node status's after {time()-start}s")
 
         job_ref = self.db.collection("jobs").document(job_id)
         job = job_ref.get().to_dict()

@@ -47,10 +47,10 @@ deploy-test:
 	--region=us-central1 \
 	--set-env-vars IN_PRODUCTION=False \
 	--min-instances 0 \
-	--max-instances 10 \
-	--memory 4Gi \
+	--max-instances 5 \
+	--memory 2Gi \
 	--cpu 1 \
-	--timeout 300 \
+	--timeout 360 \
 	--concurrency 20 \
 	--allow-unauthenticated
 
@@ -108,7 +108,7 @@ deploy-prod:
 	--max-instances 20 \
 	--memory 4Gi \
 	--cpu 1 \
-	--timeout 300 \
+	--timeout 360 \
 	--concurrency 20 \
 	--allow-unauthenticated
 
