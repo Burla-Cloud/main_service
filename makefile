@@ -28,7 +28,7 @@ restart_prod_cluster:
 	curl -X POST -H "$${AUTH_HEADER}" -H "Content-Length: 0" https://cluster.burla.dev/restart_cluster
 
 test_node:
-	poetry run python -c "from main_service.node import Node; Node.start('n1-standard-96')"
+	poetry run python -c "from main_service.node import Node; Node.start('n4-standard-2')"
 
 deploy-test:
 	set -e; \

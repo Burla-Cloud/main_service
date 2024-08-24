@@ -28,21 +28,25 @@ echo \
 apt-get update
 apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
-# install gcloud and use it to authenticate docker with GAR also
+# use gcloud (should be installed) it to authenticate docker with GAR
+gcloud auth configure-docker us-docker.pkg.dev
+
+# install latest node service and pip install packages for faster node starts (less to install)
+git clone --depth 1 --branch ??? https://github.com/Burla-Cloud/node_service.git
+# pull latest container service image for faster node starts (less to download)
+docker pull us-docker.pkg.dev/burla-test/burla-job-containers/default/image-nogpu:???
 ```
 """
 
-import os
 import json
 import requests
 from dataclasses import dataclass, asdict
 from requests.exceptions import ConnectionError, ConnectTimeout, Timeout
 from time import sleep, time
 from uuid import uuid4
-from typing import Optional
+from typing import Optional, Callable
 from datetime import datetime, timedelta
 
-from fastapi import BackgroundTasks
 from google.api_core.exceptions import NotFound, ServiceUnavailable, Conflict
 from google.cloud import firestore
 from google.cloud.firestore import SERVER_TIMESTAMP, Increment
@@ -57,10 +61,11 @@ from google.cloud.compute_v1 import (
     Tags,
     InstancesClient,
     Instance,
+    Scheduling,
 )
 
 from main_service import PROJECT_ID, TZ, IN_PROD
-from main_service.helpers import get_secret, Logger, add_logged_background_task
+from main_service.helpers import Logger
 
 
 @dataclass
@@ -91,8 +96,8 @@ class UnjustifiedDeletion(Exception):
     pass
 
 
-# This was guessed
-TOTAL_BOOT_TIME = timedelta(seconds=60 * 3)
+# This was 100% guessed, is used for estimates
+TOTAL_BOOT_TIME = timedelta(seconds=60 * 4)
 TOTAL_REBOOT_TIME = timedelta(seconds=60 * 1)
 
 # default compute engine svc account
@@ -115,20 +120,56 @@ def get_startup_script(instance_name: str):
     # This script uses git instead of the github api because the github api SUCKS
     
     # Increases max num open files so we can have more connections open.
-    ulimit -n 4096
+    # ulimit -n 4096 # baked into image when I built `burla-cluster-node-image-5`
 
     # This needs to be here, I can't figure out how to remove it from the image.
     rm -rf node_service
 
     gcloud config set account {GCE_DEFAULT_SVC}
 
-    git clone --depth 1 --branch {NODE_SVC_VERSION} git@github.com:Burla-Cloud/node_service.git
+    git clone --depth 1 --branch {NODE_SVC_VERSION} https://github.com/Burla-Cloud/node_service.git
     cd node_service
     python3.11 -m pip install --break-system-packages .
 
     export IN_PRODUCTION="{IN_PROD}"
     export INSTANCE_NAME="{instance_name}"
     python3.11 -m uvicorn node_service:app --host 0.0.0.0 --port 8080 --workers 1 --timeout-keep-alive 600
+    """
+
+
+def get_shutdown_script(instance_name: str):
+    firestore_base_url = "https://firestore.googleapis.com"
+    firestore_db_url = f"{firestore_base_url}/v1/projects/{PROJECT_ID}/databases/(default)"
+    firestore_document_url = f"{firestore_db_url}/documents/nodes/{instance_name}"
+    return f"""
+    #! /bin/bash
+    # This script marks the node as "DELETED" in the database when the vm instance is shutdown.
+    # This is necessary due to situations where instances are preempted,
+    # otherwise the `main_service` doesn't know which vm's are still running when starting a job,
+    # checking if they are still running is too slow, increasing latency.
+
+    # record environment variable indicating whether this instance was preempted.
+    preempted_instances_matching_filter=$( \
+        gcloud compute operations list \
+        --filter="operationType=compute.instances.preempted AND targetLink:instances/{instance_name}" \
+    )
+    # Set PREEMPTED to true if the output is non-empty, otherwise false
+    export PREEMPTED=$([ -n "$preempted_instances_matching_filter" ] && echo true || echo false)
+
+    curl -X PATCH \
+    -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+    -H "Content-Type: application/json" \
+    -d '{{
+        "fields": {{
+            "status": {{
+                "stringValue": "DELETED"
+            }},
+            "preempted": {{
+                "booleanValue": '"$PREEMPTED"'
+            }}
+        }}
+    }}' \
+    "{firestore_document_url}?updateMask.fieldPaths=status&updateMask.fieldPaths=preempted"
     """
 
 
@@ -149,7 +190,7 @@ class Node:
         cls,
         db: firestore.Client,
         logger: Logger,
-        background_tasks: BackgroundTasks,
+        add_background_task: Callable,
         machine_type: str,
         started_booting_at: datetime,
         instance_name: Optional[str] = None,
@@ -167,7 +208,7 @@ class Node:
         self = cls.__new__(cls)
         self.db = db
         self.logger = logger
-        self.background_tasks = background_tasks
+        self.add_background_task = add_background_task
         self.instance_name = f"burla-node-{uuid4().hex}" if instance_name is None else instance_name
         self.machine_type = machine_type
         self.containers = containers
@@ -189,7 +230,7 @@ class Node:
         cls,
         db: firestore.Client,
         logger: Logger,
-        background_tasks: BackgroundTasks,
+        add_background_task: Callable,
         instance_name: str,
         machine_type: str,
         delete_when_done: bool,
@@ -210,7 +251,7 @@ class Node:
         return cls._init(
             db=db,
             logger=logger,
-            background_tasks=background_tasks,
+            add_background_task=add_background_task,
             instance_name=instance_name,
             machine_type=machine_type,
             containers=containers,
@@ -231,7 +272,7 @@ class Node:
         cls,
         db: firestore.Client,
         logger: Logger,
-        background_tasks: BackgroundTasks,
+        add_background_task: Callable,
         machine_type: str,
         job_id: str,
         parallelism: int,
@@ -239,7 +280,7 @@ class Node:
         instance_name: Optional[str] = None,
         containers: Optional[list[Container]] = None,
         delete_when_done: bool = False,
-        disk_image: str = "global/images/burla-cluster-node-image-4",
+        disk_image: str = "global/images/burla-cluster-node-image-5",
         disk_size: int = 1000,  # <- (Gigabytes) minimum is 1000 due to disk image
         instance_client: Optional[InstancesClient] = None,
     ):
@@ -250,7 +291,7 @@ class Node:
         self = cls._init(
             db=db,
             logger=logger,
-            background_tasks=background_tasks,
+            add_background_task=add_background_task,
             instance_name=instance_name,
             machine_type=machine_type,
             containers=containers,
@@ -277,18 +318,18 @@ class Node:
         cls,
         db: firestore.Client,
         logger: Logger,
-        background_tasks: BackgroundTasks,
+        add_background_task: Callable,
         machine_type: str,
         instance_name: Optional[str] = None,
         containers: Optional[list[Container]] = None,
-        disk_image: str = "global/images/burla-cluster-node-image-4",
-        disk_size: int = 1000,  # <- (Gigabytes) minimum is 1000 due to disk image
+        disk_image: str = "global/images/burla-cluster-node-image-5",
+        disk_size: int = 10,  # <- (Gigabytes) minimum is 10 due to disk image
         instance_client: Optional[InstancesClient] = None,
     ):
         self = cls._init(
             db=db,
             logger=logger,
-            background_tasks=background_tasks,
+            add_background_task=add_background_task,
             instance_name=instance_name,
             machine_type=machine_type,
             containers=containers,
@@ -313,12 +354,15 @@ class Node:
         access_config = AccessConfig(name="External NAT", type="ONE_TO_ONE_NAT")
         network_interface = NetworkInterface(name=network_name, access_configs=[access_config])
 
+        scheduling = Scheduling(provisioning_model="SPOT", instance_termination_action="DELETE")
+
         access_anything_scope = "https://www.googleapis.com/auth/cloud-platform"
         service_account = ServiceAccount(email=GCE_DEFAULT_SVC, scopes=[access_anything_scope])
 
         startup_script = get_startup_script(self.instance_name)
+        shutdown_script = get_shutdown_script(self.instance_name)
         startup_script_metadata = Items(key="startup-script", value=startup_script)
-        ssh_key_metadata = Items(key="ssh-private-key", value=get_secret("deploybot-private-key"))
+        shutdown_script_metadata = Items(key="shutdown-script", value=shutdown_script)
         for zone in ACCEPTABLE_ZONES:
             try:
                 instance = Instance(
@@ -327,8 +371,9 @@ class Node:
                     disks=[disk],
                     network_interfaces=[network_interface],
                     service_accounts=[service_account],
-                    metadata=Metadata(items=[startup_script_metadata, ssh_key_metadata]),
+                    metadata=Metadata(items=[startup_script_metadata, shutdown_script_metadata]),
                     tags=Tags(items=["burla-cluster-node"]),
+                    scheduling=scheduling,
                 )
                 self.instance_client.insert(
                     project=PROJECT_ID, zone=zone, instance_resource=instance
@@ -456,14 +501,17 @@ class Node:
         self.update_state_in_db()
 
     def reboot(self):
-        if self.status() != "BOOTING":
-            containers_json = [container.to_dict() for container in self.containers]
-            response = requests.post(f"{self.host}/reboot", json=containers_json)
-            response.raise_for_status()
-            self.is_booting = True
+        containers_json = [container.to_dict() for container in self.containers]
+        response = requests.post(f"{self.host}/reboot", json=containers_json)
+        response.raise_for_status()
+        self.is_booting = True
+
+        status = self.status()
+        if status == "PLEASE_REBOOT":
+            sleep(1)
+            status = self.status()
 
         # confirm node is rebooting
-        status = self.status()
         if status not in ["BOOTING", "READY"]:
             raise Exception(f"Node {self.instance_name} failed start rebooting! status={status}")
 
@@ -480,7 +528,7 @@ class Node:
         self.is_booting = False
 
     def async_reboot(self):
-        add_logged_background_task(self.background_tasks, self.logger, self.reboot)
+        self.add_background_task(self.reboot)
 
     def reboot_and_execute(
         self,
@@ -499,14 +547,17 @@ class Node:
         )
 
     def async_reboot_and_execute(self, *a, **kw):
-        add_logged_background_task(
-            self.background_tasks, self.logger, self.reboot_and_execute, *a, **kw
-        )
+        self.add_background_task(self.reboot_and_execute, *a, **kw)
 
     def status(self, timeout=1, timeout_remaining=None):
         """
         Returns one of: `PLEASE_REBOOT`, `BOOTING`, `RUNNING`, `READY`, `FAILED`, `DELETING`.
         """
+
+        # TODO: nodes should manage their own document in the node service after it is created
+        # in this classes constructor. This function should use that document to tell whether
+        # non-responses are failutes or reboots.
+
         start = time()
         timeout_remaining = timeout if timeout_remaining is None else timeout_remaining
         has_timed_out = timeout_remaining < 0
@@ -567,4 +618,4 @@ class Node:
     def async_delete(self):
         self.is_deleting = True
         self.update_state_in_db()
-        add_logged_background_task(self.background_tasks, self.logger, self.delete)
+        self.add_background_task(self.delete)

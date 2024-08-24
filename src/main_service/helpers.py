@@ -73,32 +73,6 @@ class Logger:
             GCL_CLIENT.log_struct(struct, severity=severity)
 
 
-def add_logged_background_task(
-    background_tasks: BackgroundTasks, logger: Logger, func: Callable, *a, **kw
-):
-    """
-    Errors thrown in background tasks are completely hidden and ignored by default.
-    - BackgroundTasks class cannot be reliably monkeypatched
-    - BackgroundTasks cannot be reliably modified in middleware
-    - BackgroundTasks cannot be returned by dependencies (`fastapi.Depends`)
-    Hopefully I remember to use this function everytime I would normally call `.add_task` 😀🔫
-    """
-    tb_details = traceback.format_list(traceback.extract_stack()[:-1])
-    parent_traceback = "Traceback (most recent call last):\n" + format_traceback(tb_details)
-
-    def func_logged(*a, **kw):
-        try:
-            return func(*a, **kw)
-        except Exception as e:
-            exc_type, exc_value, exc_traceback = sys.exc_info()
-            tb_details = traceback.format_exception(exc_type, exc_value, exc_traceback)
-            local_traceback_no_title = "\n".join(format_traceback(tb_details).split("\n")[1:])
-            traceback_str = parent_traceback + local_traceback_no_title
-            logger.log(message=str(e), severity="ERROR", traceback=traceback_str)
-
-    background_tasks.add_task(func_logged, *a, **kw)
-
-
 def validate_create_job_request(request_json: dict):
     if request_json["python_version"] not in ["3.8", "3.9", "3.10", "3.11", "3.12"]:
         raise HTTPException(400, detail="invalid python version, } [3.8, 3.9, 3.10, 3.11, 3.12]")
