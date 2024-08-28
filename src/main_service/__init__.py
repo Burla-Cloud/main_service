@@ -3,12 +3,15 @@ import os
 import json
 import traceback
 from uuid import uuid4
-from time import time
+from time import time, sleep
+import random 
+import asyncio
 
 import pytz
 from google.cloud import firestore, logging
-from fastapi.responses import Response
-from fastapi import FastAPI, Request, BackgroundTasks, Depends
+from fastapi.responses import Response, HTMLResponse
+from fastapi import FastAPI, Request, BackgroundTasks, Depends, HTTPException, status
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.datastructures import UploadFile
 
@@ -21,8 +24,8 @@ NAS_BUCKET = "burla-nas-prod" if PROJECT_ID == "burla-prod" else "burla-nas"
 JOB_ENV_REPO = f"us-docker.pkg.dev/{PROJECT_ID}/burla-job-containers/default"
 
 # BURLA_BACKEND_URL = "http://10.0.4.35:5002"
-# BURLA_BACKEND_URL = "https://backend.test.burla.dev"
-BURLA_BACKEND_URL = "https://backend.burla.dev"
+BURLA_BACKEND_URL = "https://backend.test.burla.dev"
+# BURLA_BACKEND_URL = "https://backend.burla.dev"
 
 # reduces number of instances / saves across some requests as opposed to using Depends
 GCL_CLIENT = logging.Client().logger("main_service")
@@ -74,6 +77,7 @@ from main_service.cluster import Cluster
 application = FastAPI(docs_url=None, redoc_url=None)
 application.include_router(jobs_router)
 application.add_middleware(SessionMiddleware, secret_key=uuid4().hex)
+application.mount("/static", StaticFiles(directory="src/main_service/static"), name="static")
 
 
 @application.get("/")
@@ -101,13 +105,14 @@ async def login__log_and_time_requests__log_errors(request: Request, call_next):
     Catching errors in a `Depends` function will not distinguish
         http errors originating here vs other services.
     """
+
     start = time()
     request.state.uuid = uuid4().hex
 
-    if request.url.path != "/":  # healthchecks shouldn't need to login
+    if request.url.path not in ["/", "/dashboard", '/cluster', '/restart_cluster'] and not request.url.path.startswith("/static"):  # healthchecks shouldn't need to login or dashboard access
         user_info = validate_headers_and_login(request)
         request.state.user_email = user_info.get("email")
-
+        
     # If `get_logger` was a dependency this will be the second time a Logger is created.
     # This is fine because creating this object only attaches the `request` to a function.
     logger = Logger(request)
@@ -141,3 +146,30 @@ async def login__log_and_time_requests__log_errors(request: Request, call_next):
         add_logged_background_task(response.background, logger, logger.log, msg, latency=latency)
 
     return response
+
+
+@application.get("/dashboard", response_class=HTMLResponse)
+async def root():
+    with open("src/main_service/static/dashboard.html", "r") as file:
+        html_content = file.read()
+    return HTMLResponse(content=html_content)
+
+
+@application.post("/cluster")
+async def wait_for_seconds():
+    await asyncio.sleep(12)
+    
+    # Randomly decide the outcome
+    random_value = random.random()
+    
+    if random_value < 0.50:
+        return "Success"
+    elif random_value < 0.7:
+        raise HTTPException(status_code=500, detail="Cluster Failed")
+    elif random_value < 0.8:
+        # Simulate a timeout error
+        raise HTTPException(status_code=status.HTTP_408_REQUEST_TIMEOUT, detail="Cluster Failed")
+    else:
+        # Simulate a network connectivity error
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Cluster Failed")
+
