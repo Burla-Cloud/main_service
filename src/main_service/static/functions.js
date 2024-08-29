@@ -23,7 +23,7 @@ function startCluster() {
         index = (index + 1) % symbols.length;
     }, 140); // Adjust the speed of the spinning effect here
 
-    fetch('http://0.0.0.0:5001/restart_cluster', {
+    fetch('http://cluster.burla.dev/restart_cluster', {
         method: 'POST'
     })
     .then(response => {

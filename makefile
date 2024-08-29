@@ -105,7 +105,7 @@ container:
 	); \
 	docker run --rm -it \
 		--name main_service \
-		-v /Users/josephperry/Documents/main_service:/home/pkg_dev/app \
+		-v $(PWD):/home/pkg_dev/app \
 		-v ~/.gitconfig:/home/pkg_dev/.gitconfig \
 		-v ~/.ssh/id_rsa:/home/pkg_dev/.ssh/id_rsa \
 		-v ~/.config/gcloud:/home/pkg_dev/.config/gcloud \

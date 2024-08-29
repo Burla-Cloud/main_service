@@ -10,6 +10,7 @@ from google.cloud import firestore, logging
 from fastapi.responses import Response, HTMLResponse
 from fastapi import FastAPI, Request, BackgroundTasks, Depends, HTTPException, status
 from fastapi.staticfiles import StaticFiles
+
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.datastructures import UploadFile
 
@@ -107,10 +108,10 @@ async def login__log_and_time_requests__log_errors(request: Request, call_next):
     start = time()
     request.state.uuid = uuid4().hex
 
-    if request.url.path not in ["/", "/dashboard", '/cluster', '/restart_cluster'] and not request.url.path.startswith("/static"):  # healthchecks shouldn't need to login or dashboard access
+    if request.url.path not in ["/", "/dashboard", '/restart_cluster'] and not request.url.path.startswith("/static"):  # healthchecks shouldn't need to login or dashboard access
         user_info = validate_headers_and_login(request)
         request.state.user_email = user_info.get("email")
-        
+
     # If `get_logger` was a dependency this will be the second time a Logger is created.
     # This is fine because creating this object only attaches the `request` to a function.
     logger = Logger(request)
@@ -145,10 +146,8 @@ async def login__log_and_time_requests__log_errors(request: Request, call_next):
 
     return response
 
-
 @application.get("/dashboard", response_class=HTMLResponse)
 async def root():
     with open("src/main_service/static/dashboard.html", "r") as file:
         html_content = file.read()
     return HTMLResponse(content=html_content)
-
