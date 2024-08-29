@@ -154,22 +154,3 @@ async def root():
         html_content = file.read()
     return HTMLResponse(content=html_content)
 
-
-@application.post("/cluster")
-async def wait_for_seconds():
-    await asyncio.sleep(12)
-    
-    # Randomly decide the outcome
-    random_value = random.random()
-    
-    if random_value < 0.50:
-        return "Success"
-    elif random_value < 0.7:
-        raise HTTPException(status_code=500, detail="Cluster Failed")
-    elif random_value < 0.8:
-        # Simulate a timeout error
-        raise HTTPException(status_code=status.HTTP_408_REQUEST_TIMEOUT, detail="Cluster Failed")
-    else:
-        # Simulate a network connectivity error
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Cluster Failed")
-
