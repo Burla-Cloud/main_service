@@ -23,8 +23,8 @@ NAS_BUCKET = "burla-nas-prod" if PROJECT_ID == "burla-prod" else "burla-nas"
 JOB_ENV_REPO = f"us-docker.pkg.dev/{PROJECT_ID}/burla-job-containers/default"
 
 # BURLA_BACKEND_URL = "http://10.0.4.35:5002"
-BURLA_BACKEND_URL = "https://backend.test.burla.dev"
-# BURLA_BACKEND_URL = "https://backend.burla.dev"
+# BURLA_BACKEND_URL = "https://backend.test.burla.dev"
+BURLA_BACKEND_URL = "https://backend.burla.dev"
 
 # reduces number of instances / saves across some requests as opposed to using Depends
 GCL_CLIENT = logging.Client().logger("main_service")
