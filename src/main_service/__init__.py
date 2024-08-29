@@ -3,9 +3,7 @@ import os
 import json
 import traceback
 from uuid import uuid4
-from time import time, sleep
-import random 
-import asyncio
+from time import time 
 
 import pytz
 from google.cloud import firestore, logging
