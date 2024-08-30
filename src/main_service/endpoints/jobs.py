@@ -53,6 +53,7 @@ def create_job(
     job_ref.set(
         {
             "n_sub_jobs": n_inputs,
+            "inputs_id": request_json["inputs_id"],
             "function_in_gcs": function_in_gcs,
             "func_cpu": request_json["func_cpu"],
             "func_ram": request_json["func_ram"],
@@ -136,7 +137,6 @@ def create_job(
         if not error:
             logger.log(f"Assigned node {node_doc['instance_name']} to job {job_id}.")
             node_name_no_dashes = node_doc["instance_name"].replace("-", "_")
-            job_ref.update({f"benchmark.{node_name_no_dashes}_assignd_time": time()})
             return node_doc["target_parallelism"]
         else:
             return 0
@@ -198,14 +198,9 @@ def report_job_ended(
 
     # Record/print metrics
     job_ref = DB.collection("jobs").document(job_id)
-    job_ref.update(
-        {
-            "benchmark.rpm_call_time": request_json["rpm_call_time"],
-            "benchmark.job_done_ts": request_json["job_ended_ts"],
-        }
-    )
-
     benchmark = job_ref.get().to_dict()["benchmark"]
+    benchmark.update(request_json.items())
+
     rpm_call_time = benchmark.pop("rpm_call_time")
     benchmark_sorted = dict(sorted(benchmark.items(), key=lambda item: item[1]))
     max_key_length = max(len(str(item[0])) for item in benchmark_sorted.items())
@@ -222,6 +217,6 @@ def report_job_ended(
         last_ts = ts
 
     padding = " " * (max_key_length - len("Total e2e runtime"))
-    print(f"Total e2e runtime:{padding}\t{benchmark['job_done_ts']-rpm_call_time}s\n")
+    print(f"Total e2e runtime:{padding}\t{benchmark['job_ended_ts']-rpm_call_time}s\n")
 
     return {}
