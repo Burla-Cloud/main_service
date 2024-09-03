@@ -9,8 +9,8 @@ from requests.exceptions import HTTPError
 
 import pytz
 from google.cloud import firestore, logging
-from fastapi.responses import Response, HTMLResponse
-from fastapi import FastAPI, Request, BackgroundTasks, Depends, HTTPException, status
+from fastapi.responses import Response, HTMLResponse, FileResponse
+from fastapi import FastAPI, Request, BackgroundTasks, Depends
 from fastapi.staticfiles import StaticFiles
 
 from starlette.middleware.sessions import SessionMiddleware
@@ -135,11 +135,13 @@ async def login__log_and_time_requests__log_errors(request: Request, call_next):
 
     start = time()
     request.state.uuid = uuid4().hex
-    requesting_static_file = request.url.path.startswith("/static")
-    requesting_public_endpoint = request.url.path in ["/", "/dashboard", "/restart_cluster"]
-    request_requires_authentication = not (requesting_static_file or requesting_public_endpoint)
 
-    if request_requires_authentication:
+    # don't authenticate requests to these paths
+    public_paths = ["/", "/dashboard", "/restart_cluster", "/favicon.ico"]
+    requesting_static_file = request.url.path.startswith("/static")
+    request_requires_auth = (request.url.path not in public_paths) and (not requesting_static_file)
+
+    if request_requires_auth:
         try:
             user_info = validate_headers_and_login(request)
             request.state.user_email = user_info.get("email")
@@ -184,8 +186,6 @@ async def login__log_and_time_requests__log_errors(request: Request, call_next):
     return response
 
 
-@application.get("/dashboard", response_class=HTMLResponse)
-async def root():
-    with open("src/main_service/static/dashboard.html", "r") as file:
-        html_content = file.read()
-    return HTMLResponse(content=html_content)
+@application.get("/dashboard")
+async def dashboard():
+    return FileResponse("src/main_service/static/dashboard.html")

@@ -1,7 +1,5 @@
-import sys
 import json
 import requests
-import traceback
 from time import time
 from uuid import uuid4
 from typing import Optional, Callable
