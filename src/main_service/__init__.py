@@ -9,8 +9,10 @@ from requests.exceptions import HTTPError
 
 import pytz
 from google.cloud import firestore, logging
-from fastapi.responses import Response
-from fastapi import FastAPI, Request, BackgroundTasks, Depends
+from fastapi.responses import Response, HTMLResponse
+from fastapi import FastAPI, Request, BackgroundTasks, Depends, HTTPException, status
+from fastapi.staticfiles import StaticFiles
+
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.datastructures import UploadFile
 
@@ -102,6 +104,7 @@ from main_service.cluster import Cluster
 application = FastAPI(docs_url=None, redoc_url=None)
 application.include_router(jobs_router)
 application.add_middleware(SessionMiddleware, secret_key=uuid4().hex)
+application.mount("/static", StaticFiles(directory="src/main_service/static"), name="static")
 
 
 @application.get("/")
@@ -129,10 +132,14 @@ async def login__log_and_time_requests__log_errors(request: Request, call_next):
     Catching errors in a `Depends` function will not distinguish
         http errors originating here vs other services.
     """
+
     start = time()
     request.state.uuid = uuid4().hex
+    requesting_static_file = request.url.path.startswith("/static")
+    requesting_public_endpoint = request.url.path in ["/", "/dashboard", "/restart_cluster"]
+    request_requires_authentication = not (requesting_static_file or requesting_public_endpoint)
 
-    if request.url.path != "/":  # healthchecks shouldn't need to login
+    if request_requires_authentication:
         try:
             user_info = validate_headers_and_login(request)
             request.state.user_email = user_info.get("email")
@@ -175,3 +182,10 @@ async def login__log_and_time_requests__log_errors(request: Request, call_next):
         add_background_task(response.background, logger, logger.log, msg, latency=latency)
 
     return response
+
+
+@application.get("/dashboard", response_class=HTMLResponse)
+async def root():
+    with open("src/main_service/static/dashboard.html", "r") as file:
+        html_content = file.read()
+    return HTMLResponse(content=html_content)

@@ -567,4 +567,246 @@ class Cluster:
             pass
 
     def add_node_async(self, *a, **kw):
+<<<<<<< HEAD
         self.add_background_task(self.add_node, *a, **kw)
+=======
+        # allows service to respond while continuing to wait for node to start in the background.
+        add_logged_background_task(self.background_tasks, self.logger, self.add_node, *a, **kw)
+
+    def reassign_or_remove_node(self, node: Node):
+        """
+        It takes `TOTAL_BOOT_TIME` to boot up a node.
+        It takes `TOTAL_REBOOT_TIME` to reboot a node (we dont need to recreate the vm for this).
+        Its much faster (~2min) to reboot and reassign an extra node than it is to start a new one.
+
+        This function checks if the provided `node` can be rebooted and reassigned to a new job or
+        added to the the set of "READY" nodes that are waiting for new jobs (standby nodes).
+        It this node can't be reassigned it's deleted.
+        """
+        # 1. Can we reassign this node to a job to speed up that job ?
+        #    This should happen (first) over the standby speedup because of the UX implication.
+        for job in self.jobs:
+            future_parallelism = job.current_parallelism
+            # These nodes are: booting, currently assigned to `job`
+            replaceable_nodes = [n for n in self.nodes if n.current_job == job.id]
+            replaceable_nodes = [n for n in replaceable_nodes if n.finished_booting_at == None]
+
+            replaceable_nodes = sorted(replaceable_nodes, key=lambda n: n.time_until_booted())
+
+            highest_remaining_boot_time = 0
+            for replaceable_node in replaceable_nodes:
+                future_parallelism += replaceable_node.target_parallelism
+                time_spent_booting = datetime.now(TZ) - replaceable_node.started_booting_at
+                remaining_boot_time = TOTAL_BOOT_TIME - time_spent_booting
+                if remaining_boot_time > highest_remaining_boot_time:
+                    highest_remaining_boot_time = remaining_boot_time
+                    node_to_replace = replaceable_node
+            # 1a. Will this job get to it's target_parallelism? If not, fill the gap with this node.
+            if future_parallelism < job.target_parallelism:
+                parallelism_deficit = job.target_parallelism - future_parallelism
+                msg = f"Assigning node {node.instance_name} to job {job.id} to increase parallelism"
+                msg += " at a faster rate."
+                self.logger.log(msg)
+                node.async_reboot_and_execute(job_id=job.id, parallelism=parallelism_deficit)
+                return
+            # 1b. Can this node start working on `job` faster than any of the other assigned nodes ?
+            #     If so, replace the slower node, this will increase parallelism for the user faster
+            if highest_remaining_boot_time > TOTAL_REBOOT_TIME:
+                msg = f"Replacing node {node_to_replace.instance_name} with {node.instance_name} "
+                msg += f"because node {node.instance_name} is predicted to begin work on job "
+                msg += f"{node_to_replace.current_job} faster than node "
+                msg += f"{node_to_replace.instance_name} would have.\n"
+                msg += f"Deleting node {node_to_replace.instance_name} and assigning node "
+                msg += f"{node.instance_name} to job {node_to_replace.current_job}."
+                self.logger.log(msg)
+                node.async_reboot_and_execute(
+                    job_id=node_to_replace.current_job,
+                    parallelism=node_to_replace.parallelism,
+                    delete_when_done=node_to_replace.delete_when_done,
+                )
+                self.nodes.remove(node_to_replace)
+                node_to_replace.async_delete()
+                return
+
+        # 2. Can we add to the set of "READY" nodes to reach standby faster?
+        #    Doing so will increase the probablity of a low latency response if there is a request.
+        config = self.db.collection("cluster_config").document("cluster_config").get().to_dict()
+
+        # How many nodes of this `machine_type` should we have on standby ?
+        target_num_replaceable_nodes = 0
+        for node_spec in config["Nodes"]:
+            if node.machine_type == node_spec["machine_type"]:
+                target_num_replaceable_nodes = node_spec["quantity"]
+
+        # These nodes: are not assigned to a job, are booting, have same machine_type as `node`
+        _replaceable_nodes = [n for n in self.nodes if n.current_job is None]
+        _replaceable_nodes = [n for n in _replaceable_nodes if n.finished_booting_at == None]
+        replaceable_nodes = [n for n in _replaceable_nodes if n.machine_type == node.machine_type]
+
+        # 2a. Will we have enough of these machines on standby? If not, add this machine.
+        if len(replaceable_nodes) < target_num_replaceable_nodes:
+            msg = f"Rebooting node {node.instance_name} to reach desired number of standby nodes "
+            self.logger.log(msg + "in less time.")
+            node.async_reboot()
+            return
+
+        highest_remaining_boot_time = 0
+        for replaceable_node in replaceable_nodes:  # nodes not assigned to job that are booting.
+            time_spent_booting = datetime.now(TZ) - replaceable_node.started_booting_at
+            remaining_boot_time = TOTAL_BOOT_TIME - time_spent_booting
+            if remaining_boot_time > highest_remaining_boot_time:
+                highest_remaining_boot_time = remaining_boot_time
+                node_to_replace = replaceable_node
+        # 2b. Can this node reach the `READY` state faster than any of the other nodes ?
+        #     Doing so will increase the probablity of a low latency response if there is a request.
+        if highest_remaining_boot_time > TOTAL_REBOOT_TIME:
+            msg = f"Replacing node {node_to_replace.instance_name} with {node.instance_name} "
+            msg += f"because node {node.instance_name} is predicted to be READY faster than node"
+            msg += f"{node_to_replace.instance_name} would (num standby nodes reached faster).\n"
+            msg += f"Deleting node {node_to_replace.instance_name} and rebooting node "
+            self.logger.log(msg + f"{node.instance_name}.")
+            node.async_reboot()
+            self.nodes.remove(node_to_replace)
+            node_to_replace.async_delete()
+            return
+
+        # If this point is reached without having already returned, then that means this node cannot
+        # be usefully reassigned, and should be deleted.
+        msg = f"Deleting node {node.instance_name}, no useful way to reassign this node was found."
+        self.logger.log(msg)
+        self.nodes.remove(node)
+        node.async_delete()
+
+    def reconcile(self):
+        """
+        Modify cluster such that: current state -> correct/optimal state.
+        Every cluster operation (adding/deleting/assigning nodes) has a non 100% chance of success.
+        To make sure the cluster works when actions fail, we CONSTANTLY check what the state
+        should be then adjust things accordingly (what this function does).
+        """
+
+        if self.reconciling:
+            return
+        else:
+            self.reconciling = True
+
+        # Get list of burla nodes from GCE
+        node_info_from_gce = []
+        for zone, instances_scope in self.instance_client.aggregated_list(project=PROJECT_ID):
+            vms = getattr(instances_scope, "instances", [])
+            nodes = [(i.name, zone, i.status) for i in vms if "burla-cluster-node" in i.tags.items]
+            node_info_from_gce.extend(nodes)
+        # Get updated list of nodes from DB
+        # updated_cluster = self.__class__.from_database(self.db, self.logger, self.background_tasks)
+        # self.nodes = updated_cluster.nodes
+        # self.jobs = updated_cluster.jobs
+
+        # 1. Delete nodes that are in GCE but not in the DB.
+        nodes_from_db = [node.instance_name for node in self.nodes]
+        for node_name, zone, status in node_info_from_gce:
+            node_not_deleting_or_starting = status not in ["STOPPING", "TERMINATED", "PROVISIONING"]
+            if (node_name not in nodes_from_db) and node_not_deleting_or_starting:
+                zone = zone.split("/")[1]
+                msg = f"Deleting node {node_name} because it is {status} and NOT IN THE DB!"
+                self.logger.log(msg)
+                try:
+                    # not async to prevent `NotFound` errors (`.reconcile` is called constantly).
+                    self.instance_client.delete(project=PROJECT_ID, zone=zone, instance=node_name)
+                except NotFound:
+                    pass
+
+        # 2. Delete nodes that are in DB but not in GCE.
+        nodes_from_gce = [node_name for node_name, _, _ in node_info_from_gce]
+        for node in self.nodes:
+            time_since_boot = datetime.now(TZ) - node.started_booting_at
+            gce_vm_should_exist_by_now = time_since_boot > timedelta(seconds=30 * 1)
+            gce_vm_is_missing = node.instance_name not in nodes_from_gce
+            if gce_vm_is_missing and gce_vm_should_exist_by_now:
+                msg = f"Deleting node {node.instance_name} because it is not in GCE yet "
+                msg += f"and it started booting {time_since_boot.total_seconds()}s ago."
+                self.logger.log(msg)
+                node.async_delete()
+                self.nodes.remove(node)
+
+        # 3. Delete all failed nodes.
+        for node in self.nodes:
+            if node.status() == "FAILED":
+                self.logger.log(f"Deleting node: {node.instance_name} because it has FAILED")
+                node.async_delete()
+                self.nodes.remove(node)
+
+        # 4. Delete all nodes that have been stuck booting for too long.
+
+        # 5. Check that the cluster does or will match the specified default configuration.
+        #
+        # This works too well and adds nodes before the first node can be added to the db
+        #
+        # config = self.db.collection("cluster_config").document("cluster_config").get().to_dict()
+        # for spec in config["Nodes"]:
+        #     standby_nodes = [n for n in self.nodes if n.current_job is None]
+        #     standby_nodes = [n for n in standby_nodes if n.machine_type == spec["machine_type"]]
+
+        #     # not enough of this machine_type on standby ? (add more standby nodes ?)
+        #     if len(standby_nodes) < spec["quantity"]:
+        #         node_deficit = spec["quantity"] - len(standby_nodes)
+        #         for _ in range(node_deficit):
+        #             containers = [Container.from_dict(c) for c in spec["containers"]]
+        #             self.add_node_async(machine_type=spec["machine_type"], containers=containers)
+        #     # too many of this machine_type on standby ?  (remove some standby nodes ?)
+        #     elif len(standby_nodes) > spec["quantity"]:
+        #         nodes_to_remove = sorted(standby_nodes, key=lambda n: n.time_until_booted())
+        #         num_extra_nodes = len(standby_nodes) - spec["quantity"]
+        #         nodes_to_remove = nodes_to_remove[-num_extra_nodes:]
+
+        #         for node in nodes_to_remove:
+        #             if node.time_until_booted() > TOTAL_REBOOT_TIME:
+        #                 node.async_delete()  # no use reassigning if boot time is high.
+        #             else:
+        #                 node.reassign_or_remove_node()
+
+        # 6. Check that none of the current jobs are done, failed, or not being worked on.
+        #    (they should be marked as having ended)
+        for job in self.jobs:
+            nodes_assigned_to_job = [node for node in self.nodes if node.current_job == job.id]
+            nodes_working_on_job = [n for n in nodes_assigned_to_job if n.status() == "RUNNING"]
+
+            if not nodes_assigned_to_job:
+                # mark job as ended
+                job_ref = self.db.collection("jobs").document(job.id)
+                job_ref.update({"ended_at": SERVER_TIMESTAMP})
+            elif nodes_assigned_to_job and not nodes_working_on_job:
+                # state of these nodes should be one of: please_reboot, booting, ready?
+                # Nodes should have ultimatums, eg:
+                #    Be in state X within Y amount of time or your state is set to: "FAILED"
+                pass
+
+            # any_failed = False
+            # all_done = True
+            # for node in nodes_working_on_job:
+            #     job_status = node.job_status(job_id=job.id)
+            #     any_failed = job_status["any_subjobs_failed"]
+            #     all_done = job_status["all_subjobs_done"]
+            #     node_is_done = any_failed or job_status["all_subjobs_done"]
+
+            #     if node_is_done and node.delete_when_done:
+            #         node.async_delete()
+            #         self.nodes.remove(node)
+            #     elif node_is_done:
+            #         add_logged_background_task(
+            #             self.background_tasks, self.logger, self.reassign_or_remove_node, node
+            #         )
+
+            # if any_failed or all_done:
+            #     self._remove_job_from_cluster_state_in_db(job.id)
+            # if any_failed:
+            #     return "FAILED"
+            # if all_done:
+            #     return "DONE"
+
+            # return "RUNNING"
+
+        # 7. Check that all jobs do or will match the target level of parallelism.
+
+        self.reconciling = False
+        
+>>>>>>> main
