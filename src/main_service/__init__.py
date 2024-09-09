@@ -9,7 +9,7 @@ from requests.exceptions import HTTPError
 
 import pytz
 from google.cloud import firestore, logging
-from fastapi.responses import Response, HTMLResponse, FileResponse
+from fastapi.responses import Response, FileResponse
 from fastapi import FastAPI, Request, BackgroundTasks, Depends
 from fastapi.staticfiles import StaticFiles
 
@@ -20,17 +20,13 @@ from starlette.datastructures import UploadFile
 TZ = pytz.timezone("America/New_York")
 IN_DEV = os.environ.get("IN_DEV") == "True"
 IN_PROD = os.environ.get("IN_PRODUCTION") == "True"
-PROJECT_ID = "burla-prod" if IN_PROD else "burla-test"
-JOBS_BUCKET = "burla-jobs-prod" if IN_PROD else "burla-jobs"
+PROJECT_ID = "burla-prod" if IN_PROD else os.environ.get("BURLA_TEST_PROJECT")
+JOBS_BUCKET = "burla-jobs-prod" if IN_PROD else os.environ.get("BURLA_TEST_JOBS_BUCKET")
 JOB_ENV_REPO = f"us-docker.pkg.dev/{PROJECT_ID}/burla-job-containers/default"
 
 # gRPC streams will throw some unblockable annoying warnings
 os.environ["GRPC_VERBOSITY"] = "ERROR"
 
-# if IN_DEV:
-# BURLA_BACKEND_URL = "http://10.0.4.35:5002"
-# BURLA_BACKEND_URL = "https://backend.test.burla.dev"
-# else:
 BURLA_BACKEND_URL = "https://backend.burla.dev"
 
 # reduces number of instances / saves across some requests as opposed to using Depends
