@@ -31,3 +31,4 @@ ENV PYTHONDONTWRITEBYTECODE 1
 
 ENV IN_PRODUCTION True
 ENTRYPOINT poetry run uvicorn main_service:application --host 0.0.0.0 --port 8080
+
