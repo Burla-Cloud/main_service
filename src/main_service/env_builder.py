@@ -28,11 +28,10 @@ import sys
 from google.cloud import storage
 from google.cloud import firestore
 
-PROJECT_ID = os.environ["GCP_PROJECT"]
-IN_PROD = PROJECT_ID == "burla-prod"
-JOB_ID = os.environ["BURLA_JOB_ID"]
-BURLA_JOBS_BUCKET = "burla-jobs-prod" if IN_PROD else os.environ.get("BURLA_TEST_JOBS_BUCKET")
+PROJECT_ID = os.environ["PROJECT_ID"]
+JOBS_BUCKET = f"burla-jobs--" + PROJECT_ID
 
+JOB_ID = os.environ["BURLA_JOB_ID"]
 job_ref = firestore.Client(project=PROJECT_ID).collection("jobs").document(JOB_ID)
 
 pkgs_formatted = []
@@ -67,7 +66,7 @@ with tarfile.open(tar_path, "w:gz") as tar:
 print("DONE TARRING")
 
 print("UPLOADING")
-bucket_name = BURLA_JOBS_BUCKET
+bucket_name = JOBS_BUCKET
 blob_name = f"{JOB_ID}/env.tar.gz"
 storage_client = storage.Client()
 bucket = storage_client.get_bucket(bucket_name)
@@ -75,7 +74,7 @@ blob = bucket.blob(blob_name)
 blob.upload_from_filename(tar_path)
 print("DONE UPLOADING")
 
-uri = f"gs://{BURLA_JOBS_BUCKET}/{blob_name}"
+uri = f"gs://{JOBS_BUCKET}/{blob_name}"
 job_ref.update({"env.uri": uri})
 print(f"Successfully built environment at: {uri}")
 """
@@ -100,8 +99,7 @@ def start_building_environment(
         command=["/bin/sh", "-c", ENV_BUILDER_SCRIPT],
         env=[
             EnvVar(name="BURLA_JOB_ID", value=job_id),
-            EnvVar(name="GCP_PROJECT", value=PROJECT_ID),
-            EnvVar(name="BURLA_TEST_JOBS_BUCKET", value=os.environ.get("BURLA_TEST_JOBS_BUCKET")),
+            EnvVar(name="PROJECT_ID", value=PROJECT_ID),,
         ],
         resources=ResourceRequirements(limits={"memory": "32Gi", "cpu": "8"}),
     )
