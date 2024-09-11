@@ -6,7 +6,7 @@ PYTHON_MODULE_NAME = main_service
 
 ARTIFACT_REPO_NAME := $(WEBSERVICE_NAME)
 ARTIFACT_PKG_NAME := $(WEBSERVICE_NAME)
-TEST_IMAGE_BASE_NAME := us-docker.pkg.dev/burla-test-joe/$(ARTIFACT_REPO_NAME)/$(ARTIFACT_PKG_NAME)
+TEST_IMAGE_BASE_NAME := us-docker.pkg.dev/$(BURLA_TEST_PROJECT)/$(ARTIFACT_REPO_NAME)/$(ARTIFACT_PKG_NAME)
 PROD_IMAGE_BASE_NAME := us-docker.pkg.dev/burla-prod/$(ARTIFACT_REPO_NAME)/$(ARTIFACT_PKG_NAME)
 
 test:
@@ -17,9 +17,6 @@ service:
 
 restart_dev_cluster:
 	curl -X POST http://127.0.0.1:5001/restart_cluster
-
-restart_test_cluster:
-	curl -X POST -H "Content-Length: 0" https://cluster.test.burla.dev/restart_cluster
 
 restart_prod_cluster:
 	curl -X POST -H "Content-Length: 0" https://cluster.burla.dev/restart_cluster
@@ -34,15 +31,15 @@ deploy-test:
 			--package=$(ARTIFACT_PKG_NAME) \
 			--location=us \
 			--repository=$(ARTIFACT_REPO_NAME) \
-			--project=burla-test-joe \
+			--project=$(BURLA_TEST_PROJECT) \
 			2>&1 | grep -Eo '^[0-9]+' | sort -n | tail -n 1 \
 	); \
 	TEST_IMAGE_NAME=$$( echo $(TEST_IMAGE_BASE_NAME):$${TEST_IMAGE_TAG} ); \
 	gcloud run deploy $(WEBSERVICE_NAME) \
 	--image=$${TEST_IMAGE_NAME} \
-	--project burla-test-joe \
+	--project $(BURLA_TEST_PROJECT) \
 	--region=us-central1 \
-	--set-env-vars IN_PRODUCTION=False \
+	--set-env-vars PROJECT_ID=$(BURLA_TEST_PROJECT) \
 	--min-instances 0 \
 	--max-instances 5 \
 	--memory 2Gi \
@@ -58,7 +55,7 @@ move-test-image-to-prod:
 			--package=$(ARTIFACT_PKG_NAME) \
 			--location=us \
 			--repository=$(ARTIFACT_REPO_NAME) \
-			--project=burla-test-joe \
+			--project=$(BURLA_TEST_PROJECT) \
 			2>&1 | grep -Eo '^[0-9]+' | sort -n | tail -n 1 \
 	); \
 	TEST_IMAGE_NAME=$$( echo $(TEST_IMAGE_BASE_NAME):$${TEST_IMAGE_TAG} ); \
@@ -116,7 +113,7 @@ image:
 			--package=$(ARTIFACT_PKG_NAME) \
 			--location=us \
 			--repository=$(ARTIFACT_REPO_NAME) \
-			--project burla-test-joe \
+			--project $(BURLA_TEST_PROJECT) \
 			2>&1 | grep -Eo '^[0-9]+' | sort -n | tail -n 1 \
 	); \
 	NEW_TEST_IMAGE_TAG=$$(($${TEST_IMAGE_TAG} + 1)); \
@@ -133,7 +130,7 @@ container:
 			--package=$(ARTIFACT_PKG_NAME) \
 			--location=us \
 			--repository=$(ARTIFACT_REPO_NAME) \
-			--project burla-test-joe \
+			--project $(BURLA_TEST_PROJECT) \
 			2>&1 | grep -Eo '^[0-9]+' | sort -n | tail -n 1 \
 	); \
 	TEST_IMAGE_NAME=$$( echo $(TEST_IMAGE_BASE_NAME):$${TEST_IMAGE_TAG} ); \
@@ -142,8 +139,10 @@ container:
 		-v ~/.gitconfig:/home/pkg_dev/.gitconfig \
 		-v ~/.ssh/id_rsa:/home/pkg_dev/.ssh/id_rsa \
 		-v ~/.config/gcloud:/home/pkg_dev/.config/gcloud \
-		-e GOOGLE_CLOUD_PROJECT=burla-test-joe \
+		-e GOOGLE_CLOUD_PROJECT=$(BURLA_TEST_PROJECT) \
 		-e IN_DEV=True \
-		-e IN_PRODUCTION=False \
+		-e IN_PROD=False \
+		-e BURLA_TEST_PROJECT=$(BURLA_TEST_PROJECT) \
+		-e BURLA_TEST_JOBS_BUCKET=$(BURLA_TEST_JOBS_BUCKET) \
 		-p 5001:5001 \
 		--entrypoint poetry $${TEST_IMAGE_NAME} run bash

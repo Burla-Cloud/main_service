@@ -2,6 +2,7 @@ import sys
 import os
 import json
 import traceback
+import subprocess
 from uuid import uuid4
 from time import time
 from typing import Callable
@@ -19,15 +20,21 @@ from starlette.datastructures import UploadFile
 
 TZ = pytz.timezone("America/New_York")
 IN_DEV = os.environ.get("IN_DEV") == "True"
-IN_PROD = os.environ.get("IN_PRODUCTION") == "True"
-PROJECT_ID = "burla-prod" if IN_PROD else os.environ.get("BURLA_TEST_PROJECT")
-JOBS_BUCKET = "burla-jobs-prod" if IN_PROD else os.environ.get("BURLA_TEST_JOBS_BUCKET")
+IN_PROD = os.environ.get("IN_PROD") == "True"
+assert not (IN_DEV and IN_PROD)
+
+if IN_PROD:
+    PROJECT_ID = "burla-prod"
+elif IN_DEV:
+    cmd = ["gcloud", "config", "get-value", "project"]
+    PROJECT_ID = subprocess.run(cmd, capture_output=True, text=True).stdout.strip()
+else:  # must be in test env
+    PROJECT_ID = os.environ["PROJECT_ID"]
+
+JOBS_BUCKET = f"burla-jobs--{PROJECT_ID}"
 JOB_ENV_REPO = f"us-docker.pkg.dev/{PROJECT_ID}/burla-job-containers/default"
-
-# gRPC streams will throw some unblockable annoying warnings
-os.environ["GRPC_VERBOSITY"] = "ERROR"
-
 BURLA_BACKEND_URL = "https://backend.burla.dev"
+os.environ["GRPC_VERBOSITY"] = "ERROR"  # gRPC streams throw some unblockable annoying warnings
 
 # reduces number of instances / saves across some requests as opposed to using Depends
 GCL_CLIENT = logging.Client().logger("main_service")

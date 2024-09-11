@@ -1,3 +1,4 @@
+import os
 from typing import List
 from time import sleep
 from requests import get
@@ -28,8 +29,9 @@ from google.cloud import storage
 from google.cloud import firestore
 
 PROJECT_ID = os.environ["GCP_PROJECT"]
+IN_PROD = PROJECT_ID == "burla-prod"
 JOB_ID = os.environ["BURLA_JOB_ID"]
-BURLA_JOBS_BUCKET = "burla-jobs" if PROJECT_ID == "burla-test" else "burla-jobs-prod"
+BURLA_JOBS_BUCKET = "burla-jobs-prod" if IN_PROD else os.environ.get("BURLA_TEST_JOBS_BUCKET")
 
 job_ref = firestore.Client(project=PROJECT_ID).collection("jobs").document(JOB_ID)
 
@@ -99,6 +101,7 @@ def start_building_environment(
         env=[
             EnvVar(name="BURLA_JOB_ID", value=job_id),
             EnvVar(name="GCP_PROJECT", value=PROJECT_ID),
+            EnvVar(name="BURLA_TEST_JOBS_BUCKET", value=os.environ.get("BURLA_TEST_JOBS_BUCKET")),
         ],
         resources=ResourceRequirements(limits={"memory": "32Gi", "cpu": "8"}),
     )
