@@ -99,7 +99,7 @@ def start_building_environment(
         command=["/bin/sh", "-c", ENV_BUILDER_SCRIPT],
         env=[
             EnvVar(name="BURLA_JOB_ID", value=job_id),
-            EnvVar(name="PROJECT_ID", value=PROJECT_ID),,
+            EnvVar(name="PROJECT_ID", value=PROJECT_ID),
         ],
         resources=ResourceRequirements(limits={"memory": "32Gi", "cpu": "8"}),
     )

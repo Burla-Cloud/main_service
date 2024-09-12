@@ -22,7 +22,7 @@ IN_DEV = os.environ.get("IN_DEV") == "True"
 IN_PROD = os.environ.get("IN_PROD") == "True"
 assert not (IN_DEV and IN_PROD)
 
-PROJECT_ID = "burla-prod" if IN_PROD else os.environ["PROJECT_ID"]
+PROJECT_ID = "burla-prod" if IN_PROD else os.environ.get("PROJECT_ID")
 JOBS_BUCKET = f"burla-jobs--{PROJECT_ID}"
 JOB_ENV_REPO = f"us-docker.pkg.dev/{PROJECT_ID}/burla-job-containers/default"
 BURLA_BACKEND_URL = "https://backend.burla.dev"

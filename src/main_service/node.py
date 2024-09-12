@@ -38,7 +38,7 @@ docker pull us-docker.pkg.dev/<YOUR PROJECT HERE>/burla-job-containers/default/i
 ```
 """
 
-import subprocess
+import os
 import json
 import requests
 from dataclasses import dataclass, asdict
@@ -105,15 +105,14 @@ TOTAL_REBOOT_TIME = timedelta(seconds=60 * 1)
 if IN_PROD:
     GCE_DEFAULT_SVC = "1057122726382-compute@developer.gserviceaccount.com"
 else:
-    cmd = ["gcloud", "projects", "describe", PROJECT_ID, '--format="value(projectNumber)"']
-    PROJECT_NUM = subprocess.run(cmd, capture_output=True, text=True).stdout.strip()
+    PROJECT_NUM = os.environ["PROJECT_NUM"]
     GCE_DEFAULT_SVC = f"{PROJECT_NUM}-compute@developer.gserviceaccount.com"
 
 DEFAULT_DISK_IMAGE = "projects/burla-prod/global/images/burla-cluster-node-image-5"
 
-NODE_START_TIMEOUT = 60 * 5
+NODE_START_TIMEOUT = 60 * 3
 NODE_SVC_PORT = "8080"
-ACCEPTABLE_ZONES = ["us-central1-a", "us-central1-b", "us-central1-c", "us-central1-f"]
+ACCEPTABLE_ZONES = ["us-central1-b", "us-central1-c", "us-central1-f", "us-central1-a"]
 NODE_SVC_VERSION = "0.1.3-alpha"  # <- this maps to a git tag /  github release
 
 
@@ -412,17 +411,19 @@ class Node:
         self.host = f"http://{external_ip}:{NODE_SVC_PORT}"
         self.zone = zone
 
-        status = self.status(timeout=NODE_START_TIMEOUT)  # <- won't return until service is up
+        start = time()
+        status = self.status()
         while status != "READY":
+            sleep(1)
+            status = self.status()
             if status == "FAILED":
                 self.delete()
                 raise Exception(f"Node {self.instance_name} Failed to start!")
-            elif status not in ["BOOTING", "BOOTING", "PLEASE_REBOOT"]:
-                raise Exception(f"UNEXPECTED STATE WHILE BOOTING: {status}")
-            elif status == "PLEASE_REBOOT":
+            if status == "PLEASE_REBOOT":
                 self.reboot()  # <- node doesn't boot containers automatically
-            sleep(5)
-            status = self.status()
+            if (time() - start) > 60 * 3:
+                self.delete()
+                raise Exception(f"Node {self.instance_name} not booted after 3 minutes.")
 
         self.is_booting = False
         self.finished_booting_at = datetime.now(TZ)
@@ -562,7 +563,7 @@ class Node:
 
         # TODO: nodes should manage their own document in the node service after it is created
         # in this classes constructor. This function should use that document to tell whether
-        # non-responses are failutes or reboots.
+        # non-responses are failures or reboots.
 
         start = time()
         timeout_remaining = timeout if timeout_remaining is None else timeout_remaining

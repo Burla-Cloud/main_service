@@ -6,9 +6,6 @@ PYTHON_MODULE_NAME = main_service
 
 ARTIFACT_REPO_NAME := $(WEBSERVICE_NAME)
 ARTIFACT_PKG_NAME := $(WEBSERVICE_NAME)
-
-PROJECT_ID := $(shell gcloud config get-value project)
-TEST_IMAGE_BASE_NAME := us-docker.pkg.dev/$(PROJECT_ID)/$(ARTIFACT_REPO_NAME)/$(ARTIFACT_PKG_NAME)
 PROD_IMAGE_BASE_NAME := us-docker.pkg.dev/burla-prod/$(ARTIFACT_REPO_NAME)/$(ARTIFACT_PKG_NAME)
 
 test:
@@ -28,20 +25,27 @@ test_node:
 
 deploy-test:
 	set -e; \
+	PROJECT_ID=$$(gcloud config get-value project 2>/dev/null); \
+	PROJECT_NUM=$$( \
+		gcloud projects describe $${PROJECT_ID} --format="value(projectNumber)"  2>/dev/null \
+	); \
+	TEST_IMAGE_BASE_NAME=$$( echo \
+		"us-docker.pkg.dev/$${PROJECT_ID}/$(ARTIFACT_REPO_NAME)/$(ARTIFACT_PKG_NAME)" \
+	); \
 	TEST_IMAGE_TAG=$$( \
 		gcloud artifacts tags list \
 			--package=$(ARTIFACT_PKG_NAME) \
 			--location=us \
 			--repository=$(ARTIFACT_REPO_NAME) \
-			--project=$(PROJECT_ID) \
+			--project=$${PROJECT_ID} \
 			2>&1 | grep -Eo '^[0-9]+' | sort -n | tail -n 1 \
 	); \
-	TEST_IMAGE_NAME=$$( echo $(TEST_IMAGE_BASE_NAME):$${TEST_IMAGE_TAG} ); \
+	TEST_IMAGE_NAME=$$( echo $${TEST_IMAGE_BASE_NAME}:$${TEST_IMAGE_TAG} ); \
 	gcloud run deploy $(WEBSERVICE_NAME) \
 	--image=$${TEST_IMAGE_NAME} \
-	--project $(PROJECT_ID) \
+	--project $${PROJECT_ID} \
 	--region=us-central1 \
-	--set-env-vars PROJECT_ID=$(PROJECT_ID) \
+	--set-env-vars PROJECT_ID=$${PROJECT_ID},PROJECT_NUM=$${PROJECT_NUM} \
 	--min-instances 0 \
 	--max-instances 5 \
 	--memory 2Gi \
@@ -52,15 +56,19 @@ deploy-test:
 
 move-test-image-to-prod:
 	set -e; \
+	PROJECT_ID=$$(gcloud config get-value project 2>/dev/null); \
+	TEST_IMAGE_BASE_NAME=$$( echo \
+		"us-docker.pkg.dev/$${PROJECT_ID}/$(ARTIFACT_REPO_NAME)/$(ARTIFACT_PKG_NAME)" \
+	); \
 	TEST_IMAGE_TAG=$$( \
 		gcloud artifacts tags list \
 			--package=$(ARTIFACT_PKG_NAME) \
 			--location=us \
 			--repository=$(ARTIFACT_REPO_NAME) \
-			--project=$(PROJECT_ID) \
+			--project=$${PROJECT_ID} \
 			2>&1 | grep -Eo '^[0-9]+' | sort -n | tail -n 1 \
 	); \
-	TEST_IMAGE_NAME=$$( echo $(TEST_IMAGE_BASE_NAME):$${TEST_IMAGE_TAG} ); \
+	TEST_IMAGE_NAME=$$( echo $${TEST_IMAGE_BASE_NAME}:$${TEST_IMAGE_TAG} ); \
 	PROD_IMAGE_TAG=$$( \
 		gcloud artifacts tags list \
 			--package=$(ARTIFACT_PKG_NAME) \
@@ -110,16 +118,20 @@ deploy-prod:
 
 image:
 	set -e; \
+	PROJECT_ID=$$(gcloud config get-value project 2>/dev/null); \
+	TEST_IMAGE_BASE_NAME=$$( echo \
+		"us-docker.pkg.dev/$${PROJECT_ID}/$(ARTIFACT_REPO_NAME)/$(ARTIFACT_PKG_NAME)" \
+	); \
 	TEST_IMAGE_TAG=$$( \
 		gcloud artifacts tags list \
 			--package=$(ARTIFACT_PKG_NAME) \
 			--location=us \
 			--repository=$(ARTIFACT_REPO_NAME) \
-			--project $(PROJECT_ID) \
+			--project $${PROJECT_ID} \
 			2>&1 | grep -Eo '^[0-9]+' | sort -n | tail -n 1 \
 	); \
 	NEW_TEST_IMAGE_TAG=$$(($${TEST_IMAGE_TAG} + 1)); \
-	TEST_IMAGE_NAME=$$( echo $(TEST_IMAGE_BASE_NAME):$${NEW_TEST_IMAGE_TAG} ); \
+	TEST_IMAGE_NAME=$$( echo $${TEST_IMAGE_BASE_NAME}:$${NEW_TEST_IMAGE_TAG} ); \
 	gcloud builds submit --tag $${TEST_IMAGE_NAME}; \
 	echo "Successfully built Docker Image:"; \
 	echo "$${TEST_IMAGE_NAME}"; \
@@ -127,23 +139,31 @@ image:
 
 container:
 	set -e; \
+	PROJECT_ID=$$(gcloud config get-value project 2>/dev/null); \
+	PROJECT_NUM=$$( \
+		gcloud projects describe $${PROJECT_ID} --format="value(projectNumber)"  2>/dev/null \
+	); \
+	TEST_IMAGE_BASE_NAME=$$( echo \
+		"us-docker.pkg.dev/$${PROJECT_ID}/$(ARTIFACT_REPO_NAME)/$(ARTIFACT_PKG_NAME)" \
+	); \
 	TEST_IMAGE_TAG=$$( \
 		gcloud artifacts tags list \
 			--package=$(ARTIFACT_PKG_NAME) \
 			--location=us \
 			--repository=$(ARTIFACT_REPO_NAME) \
-			--project $(PROJECT_ID) \
+			--project $${PROJECT_ID} \
 			2>&1 | grep -Eo '^[0-9]+' | sort -n | tail -n 1 \
 	); \
-	TEST_IMAGE_NAME=$$( echo $(TEST_IMAGE_BASE_NAME):$${TEST_IMAGE_TAG} ); \
+	TEST_IMAGE_NAME=$$( echo $${TEST_IMAGE_BASE_NAME}:$${TEST_IMAGE_TAG} ); \
 	docker run --rm -it \
 		-v $(PWD):/home/pkg_dev/app \
 		-v ~/.gitconfig:/home/pkg_dev/.gitconfig \
 		-v ~/.ssh/id_rsa:/home/pkg_dev/.ssh/id_rsa \
 		-v ~/.config/gcloud:/home/pkg_dev/.config/gcloud \
-		-e GOOGLE_CLOUD_PROJECT=$(PROJECT_ID) \
 		-e IN_DEV=True \
 		-e IN_PROD=False \
-		-e PROJECT_ID=$(PROJECT_ID) \
+		-e GOOGLE_CLOUD_PROJECT=$${PROJECT_ID} \
+		-e PROJECT_ID=$${PROJECT_ID} \
+		-e PROJECT_NUM=$${PROJECT_NUM} \
 		-p 5001:5001 \
 		--entrypoint poetry $${TEST_IMAGE_NAME} run bash
