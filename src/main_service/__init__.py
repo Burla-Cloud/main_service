@@ -2,6 +2,8 @@ import sys
 import os
 import json
 import traceback
+import threading
+import asyncio
 from uuid import uuid4
 from time import time
 from typing import Callable
@@ -9,12 +11,17 @@ from requests.exceptions import HTTPError
 
 import pytz
 from google.cloud import firestore, logging
-from fastapi.responses import Response, FileResponse
+from fastapi.responses import Response, FileResponse, RedirectResponse
 from fastapi import FastAPI, Request, BackgroundTasks, Depends
 from fastapi.staticfiles import StaticFiles
+from google.cloud.firestore_v1 import FieldFilter
 
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.datastructures import UploadFile
+from starlette.responses import StreamingResponse
+
+os.environ["GRPC_VERBOSITY"] = "ERROR"
+os.environ["GLOG_minloglevel"] = "2"
 
 
 TZ = pytz.timezone("America/New_York")
@@ -32,6 +39,7 @@ os.environ["GRPC_VERBOSITY"] = "ERROR"  # gRPC streams throw some unblockable an
 # reduces number of instances / saves across some requests as opposed to using Depends
 GCL_CLIENT = logging.Client().logger("main_service")
 DB = firestore.Client(project=PROJECT_ID)
+test_db = firestore.Client(project="joe-test-407923")
 
 
 from main_service.helpers import (
@@ -104,8 +112,13 @@ application.mount("/static", StaticFiles(directory="src/main_service/static"), n
 
 
 @application.get("/")
-def health_check():
-    return json.dumps({"status": "ok"})
+def dashboard():
+    return FileResponse("src/main_service/static/dashboard.html")
+
+
+@application.get("/favicon.ico")
+async def favicon():
+    return RedirectResponse(url="/static/favicon.ico")
 
 
 @application.post("/restart_cluster")
@@ -133,7 +146,7 @@ async def login__log_and_time_requests__log_errors(request: Request, call_next):
     request.state.uuid = uuid4().hex
 
     # don't authenticate requests to these paths
-    public_paths = ["/", "/dashboard", "/restart_cluster", "/favicon.ico"]
+    public_paths = ["/", "/dashboard", "/restart_cluster", "/favicon.ico", "/monitor", "/shutdown"]
     requesting_static_file = request.url.path.startswith("/static")
     request_requires_auth = (request.url.path not in public_paths) and (not requesting_static_file)
 
@@ -182,6 +195,46 @@ async def login__log_and_time_requests__log_errors(request: Request, call_next):
     return response
 
 
-@application.get("/dashboard")
-async def dashboard():
-    return FileResponse("src/main_service/static/dashboard.html")
+@application.get("/monitor")
+async def monitor_cluster():
+    streamed_nodes = {}  # Dictionary to store nodes and their last streamed status
+
+    async def node_stream():
+        while True:  # Continuously monitor the database without relying on cluster_done
+            # Reference the 'nodes' collection
+            nodes_ref = test_db.collection("nodes")
+
+            # Create a FieldFilter for the 'status' field to include 'BOOTING' and 'RUNNING'
+            status_filter = FieldFilter("status", "in", ["BOOTING", "RUNNING"])
+            query = nodes_ref.where(filter=status_filter)
+
+            # Query the documents in the 'nodes' collection that match the filter
+            docs = query.stream()
+
+            current_node_ids = set()  # Track nodes currently booting or running
+
+            # Iterate over each document in the query result
+            for doc in docs:
+                node_data = doc.to_dict()
+                node_id = doc.id
+                current_status = node_data["status"]
+                current_node_ids.add(node_id)
+
+                # Stream only nodes that are booting or running and haven't been streamed before
+                if current_status in ["BOOTING", "RUNNING"]:
+                    previous_status = streamed_nodes.get(node_id)
+                    if previous_status != current_status:
+                        yield f"data: node_id: {node_id} ==> status: {current_status}\n\n"
+                        streamed_nodes[node_id] = current_status  # Update streamed status
+
+            # Stream nodes that are no longer active
+            for node_id in list(streamed_nodes.keys()):
+                if node_id not in current_node_ids:
+                    yield f"data: node_id: {node_id} removed from stream as it's no longer active.\n\n"
+                    del streamed_nodes[node_id]
+
+            # Wait 1.5 seconds before checking the status again
+            await asyncio.sleep(1.5)
+
+    # Stream the node statuses as a server-sent event (SSE)
+    return StreamingResponse(node_stream(), media_type="text/event-stream")
