@@ -1,20 +1,26 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Burla Cluster</title>
     <link rel="icon" href="/static/favicon.ico" type="image/x-icon">
     <style>
-        html, body {
+        html,
+        body {
             height: 100%;
-            overflow-x: hidden; /* Prevent horizontal overflow */
-            overflow-y: hidden; /* Allow vertical scrolling only if necessary */
+            overflow-x: hidden;
+            /* Prevent horizontal overflow */
+            overflow-y: hidden;
+            /* Allow vertical scrolling only if necessary */
         }
 
         body {
             display: flex;
-            justify-content: center;  /* Centers content horizontally */
-            align-items: flex-start;  /* Aligns content to the top */
+            justify-content: center;
+            /* Centers content horizontally */
+            align-items: flex-start;
+            /* Aligns content to the top */
             min-height: 100vh;
             margin: 0;
             padding: 0;
@@ -54,7 +60,8 @@
             text-align: center;
         }
 
-        img, button {
+        img,
+        button {
             display: block;
             margin: 0 0 1rem 0;
             text-align: left;
@@ -79,7 +86,7 @@
             margin-top: 28px;
             padding: 0;
             text-align: left;
-        }   
+        }
 
         #response-message {
             display: inline-block;
@@ -90,20 +97,13 @@
         }
 
         p {
-            margin-top: 10px; /* Reduce the top margin to move it closer */
-            margin-bottom: 5px; /* Remove any bottom margin */
+            margin-top: 10px;
+            /* Reduce the top margin to move it closer */
+            margin-bottom: 5px;
+            /* Remove any bottom margin */
         }
     </style>
-
-    <!-- Link to the external JavaScript file -->
     <script src="/static/functions.js"></script>
-
-    <!-- Automatically start monitoring when the page loads -->
-    <script>
-        window.onload = function() {
-            monitorCluster();  // Automatically start monitoring when the page loads
-        };
-    </script>
 </head>
 
 <body>
@@ -116,11 +116,12 @@
             <span id="response-message"></span>
         </div>
         <p>_____________________________________________________________</p>
-        Cluster Status: <span id="cluster-status"></span> 
+        Cluster Status: <span id="cluster-status"></span>
         <div id="monitor-message"></div>
         <p>_____________________________________________________________</p>
         <br>
         <p>Email jake@burla.dev if you run into any issues, thanks for trying Burla!</p>
-    </div>    
+    </div>
 </body>
+
 </html>

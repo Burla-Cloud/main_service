@@ -1,104 +1,70 @@
 let clusterIsOn = false; // Track cluster status globally
 let eventSource; // Reuse the EventSource globally
 
-// Function to monitor the cluster status and handle the display of nodes
-function monitorCluster() {
-    const monitorElement = document.getElementById('monitor-message');
-    const clusterStatus = document.getElementById('cluster-status');
-    const buttonElement = document.querySelector('button'); // Select the button to change text
-    let eventSource = new EventSource('/monitor');  // SSE to stream node statuses
-    let nodes = {};  // Object to track the current status of each node
+function watchCluster() {
+    const nodesElement = document.getElementById('monitor-message');
+    const clusterElement = document.getElementById('cluster-status');
+    const restartButton = document.querySelector('button');
+    let eventSource = new EventSource('/v1/cluster');
+    let nodes = {};
 
-    // Initially set the cluster status to OFF
-    clusterStatus.textContent = "OFF";
-    updateButtonText("Start Cluster"); // Set button text initially
+    console.log("HERE")
+    clusterElement.textContent = "OFF";
+    restartButton.textContent = "Start Cluster";
 
     eventSource.onmessage = function(event) {
-        const data = event.data;
-        console.log('Data received:', data);
+        const data = JSON.parse(event.data);
+        const { nodeId, status, deleted } = data;
 
-        // Extract node ID and status from the streamed data
-        const nodeIdMatch = data.match(/node_id: (\S+)/);
-        const statusMatch = data.match(/==> status: (\S+)/);
-        const removedMatch = data.match(/removed from stream/);
-
-        if (nodeIdMatch) {
-            const nodeId = nodeIdMatch[1];
-            if (statusMatch) {
-                const status = statusMatch[1];
-
-                // Only show nodes with status RUNNING or BOOTING
-                if (status === "RUNNING" || status === "BOOTING") {
-                    nodes[nodeId] = status;  // Update the node's status
-                }
-
-                // Update the monitor display and the cluster status based on all nodes
-                updateMonitorDisplay(nodes);
-                updateClusterStatus(nodes, buttonElement); // Pass buttonElement to update function
-            }
+        if (status) {
+            nodes[nodeId] = status;
+        } else if (deleted) {
+            delete nodes[nodeId];
         }
-
-        // Handle nodes that are removed from the stream
-        if (removedMatch && nodeIdMatch) {
-            const nodeId = nodeIdMatch[1];
-            delete nodes[nodeId];  // Remove the node from the nodes object
-            updateMonitorDisplay(nodes);  // Update the monitor display
-            updateClusterStatus(nodes, buttonElement);  // Update the cluster status
-        }
+        
+        updateNodesStatus(nodes);
+        updateClusterStatus(nodes, restartButton);
     };
 
     eventSource.onerror = function(error) {
-        console.error('Error with EventSource:', error);
-        monitorElement.textContent = "Error: Unable to receive updates.";
+        nodesElement.innerHTML = "";
+        nodesElement.textContent = "Error: Unable to receive updates.";
         eventSource.close();
     };
 
-    // Function to update the monitor display with current node statuses
-    function updateMonitorDisplay(nodes) {
-        monitorElement.innerHTML = "";  // Clear the current content
+    function updateNodesStatus(nodes) {
+        nodesElement.innerHTML = "";
 
         for (const nodeId in nodes) {
             const status = nodes[nodeId];
-            const nodeElement = document.createElement("div");  // Create a new div for each node
-            nodeElement.textContent = `Node ==> ${nodeId}: ${status}`;  // Display node status
-            monitorElement.appendChild(nodeElement);  // Append node element to the monitor
+            const nodeElement = document.createElement("div");
+            nodeElement.textContent = `Node ${nodeId} is ${status}`;
+            nodesElement.appendChild(nodeElement);
         }
     }
 
-    // Function to update the cluster status based on all node statuses
-    function updateClusterStatus(nodes, buttonElement) {
-        const nodeStatuses = Object.values(nodes);  // Get an array of all node statuses
+    function updateClusterStatus(nodes, restartButton) {
+        const nodeStatuses = Object.values(nodes);
 
         if (nodeStatuses.length === 0) {
-            // If there are no nodes, set the status to OFF
-            clusterStatus.textContent = "OFF";
-            updateButtonText("Start Cluster");  // Update the button text
-        } else if (nodeStatuses.includes("BOOTING")) {
-            // If any node is BOOTING, set the status to "BOOTING UP!"
-            clusterStatus.textContent = "BOOTING UP!";
-            updateButtonText("Restart Cluster");  // Update the button text
-        } else if (nodeStatuses.every(status => status === "RUNNING")) {
-            // If all nodes are RUNNING, set the status to "ON"
-            clusterStatus.textContent = "ON";
-            updateButtonText("Restart Cluster");  // Update the button text
-        }
-    }
+            clusterElement.textContent = "OFF";
+            restartButton.textContent = "Start Cluster";
 
-    // Helper function to update the button text
-    function updateButtonText(text) {
-        buttonElement.textContent = text;  // Update the button label
+        } else if (nodeStatuses.includes("BOOTING")) {
+            clusterElement.textContent = "BOOTING";
+            restartButton.textContent = "Restart Cluster";
+
+        } else if (nodeStatuses.every(status => status === "READY")) {
+            clusterElement.textContent = "ON";
+            restartButton.textContent = "Restart Cluster";
+        }
     }
 }
 
 function startCluster() {
-    const buttonElement = document.querySelector('button');
+    const restartButton = document.querySelector('button');
     const messageElement = document.getElementById('response-message');
 
-    // Start the cluster process
-    startClusterProcess(buttonElement, messageElement);
-}
-
-function startClusterProcess(buttonElement, messageElement) {
     // Clear any previous message or loader
     messageElement.textContent = '';
     
@@ -124,8 +90,13 @@ function startClusterProcess(buttonElement, messageElement) {
         index = (index + 1) % symbols.length;
     }, 140);
 
+    const isLocalhost = window.location.hostname === 'localhost';
+    const baseUrl = isLocalhost 
+        ? 'http://localhost:5001'  // Development environment
+        : 'https://cluster.burla.dev';  // Production environment
+
     // Call the cluster start API
-    fetch('https://cluster.burla.dev/restart_cluster', { method: 'POST' })
+    fetch(`${baseUrl}/v1/cluster/restart`, { method: 'POST' })
         .then(response => {
             if (response.ok) {
                 // If the response is OK, do nothing further
@@ -147,13 +118,11 @@ function startClusterProcess(buttonElement, messageElement) {
                 clearInterval(intervalId);  // Stop the loader animation
                 loader.remove();
                 loaderMessage.remove();
-                buttonElement.disabled = false; // Re-enable the button
+                restartButton.disabled = false; // Re-enable the button
             }, 800);  // 1-second delay
         });
 }
 
-
-// Monitor the cluster status as soon as the page loads
 window.onload = function() {
-    monitorCluster(); // Start monitoring the cluster status
+    watchCluster();
 };

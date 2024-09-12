@@ -15,10 +15,10 @@ service:
 	poetry run uvicorn $(PYTHON_MODULE_NAME):application --host 0.0.0.0 --port 5001 --reload
 
 restart_dev_cluster:
-	curl -X POST http://127.0.0.1:5001/restart_cluster
+	curl -X POST http://127.0.0.1:5001/v1/cluster/restart
 
 restart_prod_cluster:
-	curl -X POST -H "Content-Length: 0" https://cluster.burla.dev/restart_cluster
+	curl -X POST -H "Content-Length: 0" https://cluster.burla.dev/v1/cluster/restart
 
 test_node:
 	poetry run python -c "from main_service.node import Node; Node.start('n4-standard-2')"
