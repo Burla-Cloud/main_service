@@ -134,7 +134,6 @@ def create_job(
 
         if not error:
             logger.log(f"Assigned node {node_doc['instance_name']} to job {job_id}.")
-            node_name_no_dashes = node_doc["instance_name"].replace("-", "_")
             return node_doc["target_parallelism"]
         else:
             return 0
@@ -148,7 +147,7 @@ def create_job(
     if current_parallelism == 0:
         add_background_task(reboot_nodes_with_job, DB, job_id)
         add_background_task(reconcile, DB, logger, add_background_task)
-        return Response(status_code=500, content="no ready nodes available.")
+        return Response(status_code=500)  # , content="no ready nodes available.")
 
     job_ref.update({"benchmark.create_job_response": time()})
     return {"job_id": job_id}

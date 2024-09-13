@@ -34,14 +34,14 @@ async def cluster_info():
     async def node_stream():
         while True:
             status_filter = FieldFilter("status", "not-in", ["DELETED", "DELETING"])
-            node_docs = DB.collection("nodes").where(filter=status_filter).stream()
+            node_docs = list(DB.collection("nodes").where(filter=status_filter).stream())
             nodes = [doc.to_dict() for doc in node_docs]
             node_names = [node["instance_name"] for node in nodes]
             names_of_deleted_nodes = set(node_name_to_status.keys()) - set(node_names)
 
             # brodcast deleted nodes:
             for node_name in names_of_deleted_nodes:
-                event_data = dict(nodeId=instance_name, deleted=True)
+                event_data = dict(nodeId=node_name, deleted=True)
                 yield f"data: {json.dumps(event_data)}\n\n"
                 del node_name_to_status[node_name]
                 print(f"deleted node: {event_data}")
@@ -51,9 +51,9 @@ async def cluster_info():
                 instance_name = node["instance_name"]
                 current_status = node["status"]
                 previous_status = node_name_to_status.get(instance_name)
-                node_name_to_status[instance_name] = current_status
 
-                if previous_status != current_status:
+                if current_status != previous_status:
+                    node_name_to_status[instance_name] = current_status
                     event_data = dict(nodeId=instance_name, status=current_status)
                     yield f"data: {json.dumps(event_data)}\n\n"
                     print(f"updated status: {event_data}")
