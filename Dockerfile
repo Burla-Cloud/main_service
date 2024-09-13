@@ -29,5 +29,5 @@ RUN poetry install --sync
 # Keeps Python from generating .pyc files in the container
 ENV PYTHONDONTWRITEBYTECODE 1
 
-ENV IN_PRODUCTION True
+ENV IN_PROD True
 ENTRYPOINT poetry run uvicorn main_service:application --host 0.0.0.0 --port 8080

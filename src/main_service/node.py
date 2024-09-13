@@ -34,10 +34,11 @@ gcloud auth configure-docker us-docker.pkg.dev
 # install latest node service and pip install packages for faster node starts (less to install)
 git clone --depth 1 --branch ??? https://github.com/Burla-Cloud/node_service.git
 # pull latest container service image for faster node starts (less to download)
-docker pull us-docker.pkg.dev/burla-test/burla-job-containers/default/image-nogpu:???
+docker pull us-docker.pkg.dev/<YOUR PROJECT HERE>/burla-job-containers/default/image-nogpu:???
 ```
 """
 
+import os
 import json
 import requests
 from dataclasses import dataclass, asdict
@@ -104,13 +105,15 @@ TOTAL_REBOOT_TIME = timedelta(seconds=60 * 1)
 if IN_PROD:
     GCE_DEFAULT_SVC = "1057122726382-compute@developer.gserviceaccount.com"
 else:
-    GCE_DEFAULT_SVC = "140225958505-compute@developer.gserviceaccount.com"
+    PROJECT_NUM = os.environ["PROJECT_NUM"]
+    GCE_DEFAULT_SVC = f"{PROJECT_NUM}-compute@developer.gserviceaccount.com"
 
+DEFAULT_DISK_IMAGE = "projects/burla-prod/global/images/burla-cluster-node-image-5"
 
-NODE_START_TIMEOUT = 60 * 5
+NODE_START_TIMEOUT = 60 * 3
 NODE_SVC_PORT = "8080"
-ACCEPTABLE_ZONES = ["us-central1-a", "us-central1-b", "us-central1-c", "us-central1-f"]
-NODE_SVC_VERSION = "0.1.2-alpha"  # <- this maps to a git tag /  github release
+ACCEPTABLE_ZONES = ["us-central1-b", "us-central1-c", "us-central1-f", "us-central1-a"]
+NODE_SVC_VERSION = "0.1.3-alpha"  # <- this maps to a git tag /  github release
 
 
 def get_startup_script(instance_name: str):
@@ -131,8 +134,10 @@ def get_startup_script(instance_name: str):
     cd node_service
     python3.11 -m pip install --break-system-packages .
 
-    export IN_PRODUCTION="{IN_PROD}"
+    export IN_PROD="{IN_PROD}"
     export INSTANCE_NAME="{instance_name}"
+    export PROJECT_ID="{PROJECT_ID}"
+
     python3.11 -m uvicorn node_service:app --host 0.0.0.0 --port 8080 --workers 1 --timeout-keep-alive 600
     """
 
@@ -280,7 +285,7 @@ class Node:
         instance_name: Optional[str] = None,
         containers: Optional[list[Container]] = None,
         delete_when_done: bool = False,
-        disk_image: str = "global/images/burla-cluster-node-image-5",
+        disk_image: str = DEFAULT_DISK_IMAGE,
         disk_size: int = 1000,  # <- (Gigabytes) minimum is 1000 due to disk image
         instance_client: Optional[InstancesClient] = None,
     ):
@@ -322,7 +327,7 @@ class Node:
         machine_type: str,
         instance_name: Optional[str] = None,
         containers: Optional[list[Container]] = None,
-        disk_image: str = "global/images/burla-cluster-node-image-5",
+        disk_image: str = DEFAULT_DISK_IMAGE,
         disk_size: int = 10,  # <- (Gigabytes) minimum is 10 due to disk image
         instance_client: Optional[InstancesClient] = None,
     ):
@@ -406,17 +411,19 @@ class Node:
         self.host = f"http://{external_ip}:{NODE_SVC_PORT}"
         self.zone = zone
 
-        status = self.status(timeout=NODE_START_TIMEOUT)  # <- won't return until service is up
+        start = time()
+        status = self.status()
         while status != "READY":
+            sleep(1)
+            status = self.status()
             if status == "FAILED":
                 self.delete()
                 raise Exception(f"Node {self.instance_name} Failed to start!")
-            elif status not in ["BOOTING", "BOOTING", "PLEASE_REBOOT"]:
-                raise Exception(f"UNEXPECTED STATE WHILE BOOTING: {status}")
-            elif status == "PLEASE_REBOOT":
+            if status == "PLEASE_REBOOT":
                 self.reboot()  # <- node doesn't boot containers automatically
-            sleep(5)
-            status = self.status()
+            if (time() - start) > 60 * 3:
+                self.delete()
+                raise Exception(f"Node {self.instance_name} not booted after 3 minutes.")
 
         self.is_booting = False
         self.finished_booting_at = datetime.now(TZ)
@@ -556,7 +563,7 @@ class Node:
 
         # TODO: nodes should manage their own document in the node service after it is created
         # in this classes constructor. This function should use that document to tell whether
-        # non-responses are failutes or reboots.
+        # non-responses are failures or reboots.
 
         start = time()
         timeout_remaining = timeout if timeout_remaining is None else timeout_remaining

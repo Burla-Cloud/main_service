@@ -9,33 +9,33 @@ from requests.exceptions import HTTPError
 
 import pytz
 from google.cloud import firestore, logging
-from fastapi.responses import Response, HTMLResponse, FileResponse
+from fastapi.responses import Response, FileResponse, RedirectResponse
 from fastapi import FastAPI, Request, BackgroundTasks, Depends
 from fastapi.staticfiles import StaticFiles
 
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.datastructures import UploadFile
 
+os.environ["GRPC_VERBOSITY"] = "ERROR"
+os.environ["GLOG_minloglevel"] = "2"
+
 
 TZ = pytz.timezone("America/New_York")
 IN_DEV = os.environ.get("IN_DEV") == "True"
-IN_PROD = os.environ.get("IN_PRODUCTION") == "True"
-PROJECT_ID = "burla-prod" if IN_PROD else "burla-test"
-JOBS_BUCKET = "burla-jobs-prod" if IN_PROD else "burla-jobs"
+IN_PROD = os.environ.get("IN_PROD") == "True"
+assert not (IN_DEV and IN_PROD)
+
+PROJECT_ID = "burla-prod" if IN_PROD else os.environ.get("PROJECT_ID")
+JOBS_BUCKET = f"burla-jobs--{PROJECT_ID}"
 JOB_ENV_REPO = f"us-docker.pkg.dev/{PROJECT_ID}/burla-job-containers/default"
-
-# gRPC streams will throw some unblockable annoying warnings
-os.environ["GRPC_VERBOSITY"] = "ERROR"
-
-# if IN_DEV:
-# BURLA_BACKEND_URL = "http://10.0.4.35:5002"
-# BURLA_BACKEND_URL = "https://backend.test.burla.dev"
-# else:
 BURLA_BACKEND_URL = "https://backend.burla.dev"
+
+os.environ["GRPC_VERBOSITY"] = "ERROR"  # gRPC streams throw some unblockable annoying warnings
 
 # reduces number of instances / saves across some requests as opposed to using Depends
 GCL_CLIENT = logging.Client().logger("main_service")
 DB = firestore.Client(project=PROJECT_ID)
+test_db = firestore.Client(project="joe-test-407923")
 
 
 from main_service.helpers import (
@@ -98,31 +98,23 @@ def get_add_background_task_function(
 
 
 from main_service.endpoints.jobs import router as jobs_router
-from main_service.cluster import Cluster
-
+from main_service.endpoints.cluster import router as cluster_router
 
 application = FastAPI(docs_url=None, redoc_url=None)
 application.include_router(jobs_router)
+application.include_router(cluster_router)
 application.add_middleware(SessionMiddleware, secret_key=uuid4().hex)
 application.mount("/static", StaticFiles(directory="src/main_service/static"), name="static")
 
 
 @application.get("/")
-def health_check():
-    return json.dumps({"status": "ok"})
+def dashboard():
+    return FileResponse("src/main_service/static/dashboard.html")
 
 
-@application.post("/restart_cluster")
-def restart_cluster(
-    add_background_task: Callable = Depends(get_add_background_task_function),
-    logger: Logger = Depends(get_logger),
-):
-    start = time()
-    cluster = Cluster.from_database(db=DB, logger=logger, add_background_task=add_background_task)
-    cluster.restart(force=True)
-    duration = time() - start
-    logger.log(f"Restarted after {duration//60}m {duration%60}s")
-    return "Success"
+@application.get("/favicon.ico")
+async def favicon():
+    return RedirectResponse(url="/static/favicon.ico")
 
 
 @application.middleware("http")
@@ -136,10 +128,10 @@ async def login__log_and_time_requests__log_errors(request: Request, call_next):
     start = time()
     request.state.uuid = uuid4().hex
 
-    # don't authenticate requests to these paths
-    public_paths = ["/", "/dashboard", "/restart_cluster", "/favicon.ico"]
+    public_endpoints = ["/", "/favicon.ico", "/v1/cluster", "/v1/cluster/restart"]
+    requesting_public_endpoint = request.url.path in public_endpoints
     requesting_static_file = request.url.path.startswith("/static")
-    request_requires_auth = (request.url.path not in public_paths) and (not requesting_static_file)
+    request_requires_auth = not (requesting_public_endpoint or requesting_static_file)
 
     if request_requires_auth:
         try:
@@ -184,8 +176,3 @@ async def login__log_and_time_requests__log_errors(request: Request, call_next):
         add_background_task(response.background, logger, logger.log, msg, latency=latency)
 
     return response
-
-
-@application.get("/dashboard")
-async def dashboard():
-    return FileResponse("src/main_service/static/dashboard.html")
