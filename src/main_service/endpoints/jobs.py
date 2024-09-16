@@ -73,8 +73,8 @@ def create_job(
         }
     )
 
-    if request_json.get("packages"):
-        start_building_environment(request_json["packages"], job_ref, job_id, image=image)
+    # if request_json.get("packages"):
+    #     start_building_environment(request_json["packages"], job_ref, job_id, image=image)
 
     # figure out which nodes will work on this job & at what parallelism
     job_ref.update({f"benchmark.node_assignment_begin": time()})
