@@ -90,6 +90,6 @@ def validate_headers_and_login(request: Request):
     if request.headers.get("Email"):
         headers["Email"] = request.headers.get("Email")
 
-    response = requests.get(f"{BURLA_BACKEND_URL}/v1/user/info", headers=headers)
+    response = requests.get(f"{BURLA_BACKEND_URL}/v1/private/user_info", headers=headers)
     response.raise_for_status()
     return response.json()
