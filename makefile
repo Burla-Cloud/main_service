@@ -116,6 +116,41 @@ deploy-prod:
 	--concurrency 20 \
 	--allow-unauthenticated
 
+deploy-dev-to-prod:
+	set -e; \
+	echo This will deploy the current local project DIRECTLY TO PROD; \
+	echo ARE YOU SURE YOU WANT TO DO THIS?; \
+	while true; do \
+		read -p "Do you want to continue? (yes/no): " yn; \
+		case $$yn in \
+			[Yy]* ) echo "Continuing..."; break;; \
+			[Nn]* ) echo "Exiting..."; exit;; \
+			* ) echo "Please answer yes or no.";; \
+		esac; \
+	done; \
+	PROD_IMAGE_TAG=$$( \
+		gcloud artifacts tags list \
+			--package=$(ARTIFACT_PKG_NAME) \
+			--location=us \
+			--repository=$(ARTIFACT_REPO_NAME) \
+			--project=burla-prod \
+			2>&1 | grep -Eo '^[0-9]+' | sort -n | tail -n 1 \
+	); \
+	NEW_PROD_IMAGE_TAG=$$(($${PROD_IMAGE_TAG} + 1)); \
+	PROD_IMAGE_NAME=$$( echo $(PROD_IMAGE_BASE_NAME):$${NEW_PROD_IMAGE_TAG} ); \
+	gcloud builds submit --tag $${PROD_IMAGE_BASE_NAME}; \
+	gcloud run deploy $(WEBSERVICE_NAME) \
+	--image=$${PROD_IMAGE_NAME} \
+	--project burla-prod \
+	--region=us-central1 \
+	--min-instances 1 \
+	--max-instances 20 \
+	--memory 4Gi \
+	--cpu 1 \
+	--timeout 360 \
+	--concurrency 20 \
+	--allow-unauthenticated
+
 image:
 	set -e; \
 	PROJECT_ID=$$(gcloud config get-value project 2>/dev/null); \

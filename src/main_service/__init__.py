@@ -173,6 +173,6 @@ async def login__log_and_time_requests__log_errors(request: Request, call_next):
         status = response.status_code
         latency = time() - start
         msg = f"{request.method} to {request.url} returned {status} after {latency} seconds."
-        add_background_task(response.background, logger, logger.log, msg, latency=latency)
+        add_background_task(response.background, logger, logger.log, msg)
 
     return response
