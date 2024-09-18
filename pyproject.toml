@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "main_service"
-version = "0.8.1"
+version = "0.8.2"
 description = ""
 authors = ["Jacob Zuliani <jake@burla.dev>"]
 packages = [{include = "main_service", from = "src"}]
@@ -24,6 +24,7 @@ starlette = "^0.35.1"
 pytz = "^2024.1"
 python-multipart = "^0.0.9"
 itsdangerous = "^2.2.0"
+slack-sdk = "^3.33.0"
 
 [tool.poetry.group.dev.dependencies]
 black = "^23.1.0"

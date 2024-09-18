@@ -6,7 +6,7 @@ from typing import Optional, Callable
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, Path, Depends
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse
 from google.cloud.firestore import FieldFilter, SERVER_TIMESTAMP, Increment
 
 
@@ -79,7 +79,12 @@ def create_job(
     # figure out which nodes will work on this job & at what parallelism
     job_ref.update({f"benchmark.node_assignment_begin": time()})
     ready_nodes_filter = FieldFilter("status", "==", "READY")
-    ready_nodes = DB.collection("nodes").where(filter=ready_nodes_filter).stream()
+    ready_nodes = list(DB.collection("nodes").where(filter=ready_nodes_filter).stream())
+
+    if len(ready_nodes) == 0:
+        msg = "Zero nodes with state `READY` are currently available."
+        content = {"error_type": "NoReadyNodes", "message": msg}
+        return JSONResponse(content=content, status_code=503)
 
     planned_future_job_parallelism = 0
     nodes_to_assign = []
@@ -101,6 +106,11 @@ def create_job(
             add_background_task(
                 node_ref.reference.update, dict(target_parallelism=node_target_parallelism)
             )
+
+    if len(nodes_to_assign) == 0:
+        msg = "No compatible nodes available."
+        content = {"error_type": "NoCompatibleNodes", "message": msg}
+        return JSONResponse(content=content, status_code=503)
 
     if request_json["parallelism"] > planned_future_job_parallelism:
         # TODO: start more nodes here to fill the gap
@@ -147,7 +157,8 @@ def create_job(
     if current_parallelism == 0:
         add_background_task(reboot_nodes_with_job, DB, job_id)
         add_background_task(reconcile, DB, logger, add_background_task)
-        return Response(status_code=500)  # , content="no ready nodes available.")
+        content = {"error_type": "JobRefused", "message": "Job refused by all available nodes."}
+        return JSONResponse(content=content, status_code=503)
 
     job_ref.update({"benchmark.create_job_response": time()})
     return {"job_id": job_id}

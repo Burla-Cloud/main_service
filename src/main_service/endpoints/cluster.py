@@ -3,13 +3,14 @@ import asyncio
 from time import time
 from typing import Callable
 
+import slack_sdk
 from fastapi import APIRouter, Depends
 from google.cloud.firestore_v1 import FieldFilter
 from starlette.responses import StreamingResponse
 
-from main_service import DB, get_logger, get_add_background_task_function
+from main_service import DB, get_logger, get_add_background_task_function, IN_PROD
 from main_service.cluster import Cluster
-from main_service.helpers import Logger
+from main_service.helpers import Logger, get_secret
 
 router = APIRouter()
 
@@ -19,6 +20,10 @@ def restart_cluster(
     add_background_task: Callable = Depends(get_add_background_task_function),
     logger: Logger = Depends(get_logger),
 ):
+    if IN_PROD:
+        client = slack_sdk.WebClient(token=get_secret("slackbot-token"))
+        client.chat_postMessage(channel="user-activity", text="Someone started the prod cluster.")
+
     start = time()
     cluster = Cluster.from_database(db=DB, logger=logger, add_background_task=add_background_task)
     cluster.restart(force=True)
