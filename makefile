@@ -118,8 +118,10 @@ deploy-prod:
 
 deploy-dev-to-prod:
 	set -e; \
-	echo This will deploy the current local project DIRECTLY TO PROD; \
+	echo ; \
+	echo This will deploy the current local project DIRECTLY TO PROD!; \
 	echo ARE YOU SURE YOU WANT TO DO THIS?; \
+	echo ; \
 	while true; do \
 		read -p "Do you want to continue? (yes/no): " yn; \
 		case $$yn in \
@@ -128,28 +130,9 @@ deploy-dev-to-prod:
 			* ) echo "Please answer yes or no.";; \
 		esac; \
 	done; \
-	PROD_IMAGE_TAG=$$( \
-		gcloud artifacts tags list \
-			--package=$(ARTIFACT_PKG_NAME) \
-			--location=us \
-			--repository=$(ARTIFACT_REPO_NAME) \
-			--project=burla-prod \
-			2>&1 | grep -Eo '^[0-9]+' | sort -n | tail -n 1 \
-	); \
-	NEW_PROD_IMAGE_TAG=$$(($${PROD_IMAGE_TAG} + 1)); \
-	PROD_IMAGE_NAME=$$( echo $(PROD_IMAGE_BASE_NAME):$${NEW_PROD_IMAGE_TAG} ); \
-	gcloud builds submit --tag $${PROD_IMAGE_BASE_NAME}; \
-	gcloud run deploy $(WEBSERVICE_NAME) \
-	--image=$${PROD_IMAGE_NAME} \
-	--project burla-prod \
-	--region=us-central1 \
-	--min-instances 1 \
-	--max-instances 20 \
-	--memory 4Gi \
-	--cpu 1 \
-	--timeout 360 \
-	--concurrency 20 \
-	--allow-unauthenticated
+	$(MAKE) image; \
+	$(MAKE) move-test-image-to-prod; \
+	echo "yes" | $(MAKE) deploy-prod
 
 image:
 	set -e; \

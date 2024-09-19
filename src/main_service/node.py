@@ -113,7 +113,7 @@ DEFAULT_DISK_IMAGE = "projects/burla-prod/global/images/burla-cluster-node-image
 NODE_START_TIMEOUT = 60 * 3
 NODE_SVC_PORT = "8080"
 ACCEPTABLE_ZONES = ["us-central1-b", "us-central1-c", "us-central1-f", "us-central1-a"]
-NODE_SVC_VERSION = "0.1.3-alpha"  # <- this maps to a git tag /  github release
+NODE_SVC_VERSION = "0.8.2"  # <- this maps to a git tag/release or branch
 
 
 def get_startup_script(instance_name: str):
