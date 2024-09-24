@@ -83,7 +83,7 @@
         }
 
         #response-container {
-            margin-top: 28px;
+            margin-top: 18px;
             padding: 0;
             text-align: left;
         }
@@ -102,6 +102,12 @@
             margin-bottom: 5px;
             /* Remove any bottom margin */
         }
+
+        .button-container {
+            display: flex;
+            gap: 10px;
+            /* Adds a 10px space between the buttons */
+        }
     </style>
     <script src="/static/functions.js"></script>
 </head>
@@ -110,8 +116,11 @@
     <div class="content">
         <img src="/static/logo_noborder.png" style="width: 20%; height: auto;" />
         <br>
-        <p>Click the button below to start the cluster, it should take 1-2 minutes to boot up.</p>
-        <button onclick="startCluster();">Start/Restart Cluster</button>
+        <p>Start and stop the cluster using the buttons below. Boot-up takes 1-2 minutes.</p>
+        <div class="button-container">
+            <button id="start-button" onclick="startCluster();">Start/Restart Cluster</button>
+            <button id="shutdown-button" onclick="shutdownCluster();">Stop Cluster</button>
+        </div>
         <div id="response-container">
             <span id="response-message"></span>
         </div>

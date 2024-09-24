@@ -6,8 +6,10 @@ from typing import Callable
 from fastapi import APIRouter, Depends
 from google.cloud.firestore_v1 import FieldFilter
 from starlette.responses import StreamingResponse
+from googleapiclient import discovery
+from googleapiclient.errors import HttpError
 
-from main_service import DB, get_logger, get_add_background_task_function
+from main_service import DB, get_logger, get_add_background_task_function, PROJECT_ID
 from main_service.cluster import Cluster
 from main_service.helpers import Logger
 
@@ -61,3 +63,49 @@ async def cluster_info():
             await asyncio.sleep(1)
 
     return StreamingResponse(node_stream(), media_type="text/event-stream")
+
+
+@router.post("/v1/cluster/shutdown")
+def shutdown_cluster():
+    # Create the Compute Engine service
+    service = discovery.build('compute', 'v1')
+    project_id = PROJECT_ID
+    
+    try:
+        # Get all zones in the project
+        request = service.zones().list(project=project_id)
+        zones = []
+
+        while request is not None:
+            response = request.execute()
+            zones.extend(zone['name'] for zone in response.get('items', []))
+            request = service.zones().list_next(previous_request=request, previous_response=response)
+
+        # Iterate over all zones and list instances
+        for zone in zones:
+            request = service.instances().list(project=project_id, zone=zone)
+
+            while request is not None:
+                response = request.execute()
+
+                if 'items' in response:
+                    for instance in response['items']:
+                        # Only delete VMs with statuses indicating they are active
+                        if instance['status'] in ['PROVISIONING', 'STAGING', 'RUNNING']:
+                            instance_name = instance['name']
+                            print(f"Deleting active VM: {instance_name} in zone: {zone}")
+                            
+                            # Delete the instance
+                            delete_request = service.instances().delete(
+                                project=project_id, zone=zone, instance=instance_name
+                            )
+                            delete_request.execute()
+                
+                request = service.instances().list_next(previous_request=request, previous_response=response)
+
+    except HttpError as err:
+        print(f"An error occurred: {err}")
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+
+    return "Cluster Off"
