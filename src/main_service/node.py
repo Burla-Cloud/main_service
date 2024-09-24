@@ -511,7 +511,6 @@ class Node:
         containers_json = [container.to_dict() for container in self.containers]
         response = requests.post(f"{self.host}/reboot", json=containers_json)
         response.raise_for_status()
-        print(response.raise_for_status)
         self.is_booting = True
 
         status = self.status()
