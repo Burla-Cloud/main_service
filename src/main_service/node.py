@@ -46,11 +46,10 @@ from requests.exceptions import ConnectionError, ConnectTimeout, Timeout
 from time import sleep, time
 from uuid import uuid4
 from typing import Optional, Callable
-from datetime import datetime, timedelta
 
 from google.api_core.exceptions import NotFound, ServiceUnavailable, Conflict
 from google.cloud import firestore
-from google.cloud.firestore import SERVER_TIMESTAMP, Increment
+from google.cloud.firestore import Increment
 from google.cloud.compute_v1 import (
     AttachedDisk,
     NetworkInterface,
@@ -65,7 +64,7 @@ from google.cloud.compute_v1 import (
     Scheduling,
 )
 
-from main_service import PROJECT_ID, TZ, IN_PROD
+from main_service import PROJECT_ID, IN_PROD
 from main_service.helpers import Logger
 
 
@@ -97,9 +96,9 @@ class UnjustifiedDeletion(Exception):
     pass
 
 
-# This was 100% guessed, is used for estimates
-TOTAL_BOOT_TIME = timedelta(seconds=60 * 4)
-TOTAL_REBOOT_TIME = timedelta(seconds=60 * 1)
+# This is 100% guessed, is used for unimportant estimates / ranking
+TOTAL_BOOT_TIME = 60
+TOTAL_REBOOT_TIME = 30
 
 # default compute engine svc account
 if IN_PROD:
@@ -110,78 +109,14 @@ else:
 
 DEFAULT_DISK_IMAGE = "projects/burla-prod/global/images/burla-cluster-node-image-5"
 
-NODE_START_TIMEOUT = 60 * 3
+NODE_START_TIMEOUT = 60 * 2
 NODE_SVC_PORT = "8080"
 ACCEPTABLE_ZONES = ["us-central1-b", "us-central1-c", "us-central1-f", "us-central1-a"]
 NODE_SVC_VERSION = "0.8.4"  # <- this maps to a git tag/release or branch
 
 
-def get_startup_script(instance_name: str):
-    return f"""
-    #! /bin/bash
-    # This script installs and starts the node service 
-    # This script uses git instead of the github api because the github api SUCKS
-    
-    # Increases max num open files so we can have more connections open.
-    # ulimit -n 4096 # baked into image when I built `burla-cluster-node-image-5`
-
-    # This needs to be here, I can't figure out how to remove it from the image.
-    rm -rf node_service
-
-    gcloud config set account {GCE_DEFAULT_SVC}
-
-    git clone --depth 1 --branch {NODE_SVC_VERSION} https://github.com/Burla-Cloud/node_service.git
-    cd node_service
-    python3.11 -m pip install --break-system-packages .
-
-    export IN_PROD="{IN_PROD}"
-    export INSTANCE_NAME="{instance_name}"
-    export PROJECT_ID="{PROJECT_ID}"
-
-    python3.11 -m uvicorn node_service:app --host 0.0.0.0 --port 8080 --workers 1 --timeout-keep-alive 600
-    """
-
-
-def get_shutdown_script(instance_name: str):
-    firestore_base_url = "https://firestore.googleapis.com"
-    firestore_db_url = f"{firestore_base_url}/v1/projects/{PROJECT_ID}/databases/(default)"
-    firestore_document_url = f"{firestore_db_url}/documents/nodes/{instance_name}"
-    return f"""
-    #! /bin/bash
-    # This script marks the node as "DELETED" in the database when the vm instance is shutdown.
-    # This is necessary due to situations where instances are preempted,
-    # otherwise the `main_service` doesn't know which vm's are still running when starting a job,
-    # checking if they are still running is too slow, increasing latency.
-
-    # record environment variable indicating whether this instance was preempted.
-    preempted_instances_matching_filter=$( \
-        gcloud compute operations list \
-        --filter="operationType=compute.instances.preempted AND targetLink:instances/{instance_name}" \
-    )
-    # Set PREEMPTED to true if the output is non-empty, otherwise false
-    export PREEMPTED=$([ -n "$preempted_instances_matching_filter" ] && echo true || echo false)
-
-    curl -X PATCH \
-    -H "Authorization: Bearer $(gcloud auth print-access-token)" \
-    -H "Content-Type: application/json" \
-    -d '{{
-        "fields": {{
-            "status": {{
-                "stringValue": "DELETED"
-            }},
-            "preempted": {{
-                "booleanValue": '"$PREEMPTED"'
-            }}
-        }}
-    }}' \
-    "{firestore_document_url}?updateMask.fieldPaths=status&updateMask.fieldPaths=preempted"
-    """
-
-
 class Node:
     """
-    This class is designed to be called only by the `main_service.cluster.Cluster` class.
-
     TODO: Error not thrown when `start` called with accellerator optimized machine type ??
     """
 
@@ -197,10 +132,11 @@ class Node:
         logger: Logger,
         add_background_task: Callable,
         machine_type: str,
-        started_booting_at: datetime,
+        started_booting_at: int,
+        finished_booting_at: Optional[int] = None,
+        inactivity_shutdown_time_sec: Optional[int] = None,
         instance_name: Optional[str] = None,
         containers: Optional[list[Container]] = None,
-        finished_booting_at: Optional[datetime] = None,
         host: Optional[str] = None,
         zone: Optional[str] = None,
         current_job: Optional[str] = None,
@@ -219,6 +155,7 @@ class Node:
         self.containers = containers
         self.started_booting_at = started_booting_at
         self.finished_booting_at = finished_booting_at
+        self.inactivity_shutdown_time_sec = inactivity_shutdown_time_sec
         self.host = host
         self.zone = zone
         self.current_job = current_job
@@ -240,8 +177,9 @@ class Node:
         machine_type: str,
         delete_when_done: bool,
         containers: Optional[list[Container]] = None,
-        started_booting_at: Optional[datetime] = None,  # time NODE (NOT VM) started booting
-        finished_booting_at: Optional[datetime] = None,  # time NODE (NOT VM) finished booting
+        started_booting_at: Optional[int] = None,  # time NODE (NOT VM) started booting
+        finished_booting_at: Optional[int] = None,  # time NODE (NOT VM) finished booting
+        inactivity_shutdown_time_sec: Optional[int] = None,
         host: Optional[str] = None,
         zone: Optional[str] = None,
         current_job: Optional[str] = None,
@@ -262,6 +200,7 @@ class Node:
             containers=containers,
             started_booting_at=started_booting_at,
             finished_booting_at=finished_booting_at,
+            inactivity_shutdown_time_sec=inactivity_shutdown_time_sec,
             delete_when_done=delete_when_done,
             host=host,
             zone=zone,
@@ -271,6 +210,36 @@ class Node:
             is_deleting=is_deleting,
             is_booting=is_booting,
         )
+
+    @classmethod
+    def start(
+        cls,
+        db: firestore.Client,
+        logger: Logger,
+        add_background_task: Callable,
+        machine_type: str,
+        instance_name: Optional[str] = None,
+        containers: Optional[list[Container]] = None,
+        inactivity_shutdown_time_sec: Optional[int] = None,
+        disk_image: str = DEFAULT_DISK_IMAGE,
+        disk_size: int = 10,  # <- (Gigabytes) minimum is 10 due to disk image
+        instance_client: Optional[InstancesClient] = None,
+    ):
+        self = cls._init(
+            db=db,
+            logger=logger,
+            add_background_task=add_background_task,
+            instance_name=instance_name,
+            machine_type=machine_type,
+            containers=containers,
+            inactivity_shutdown_time_sec=inactivity_shutdown_time_sec,
+            started_booting_at=time(),
+            instance_client=instance_client,
+        )
+        self.is_booting = True
+        self.update_state_in_db()
+        self.__start(disk_image=disk_image, disk_size=disk_size)
+        return self
 
     @classmethod
     def start_and_execute(
@@ -284,14 +253,15 @@ class Node:
         function_pkl: Optional[bytes] = None,
         instance_name: Optional[str] = None,
         containers: Optional[list[Container]] = None,
+        inactivity_shutdown_time_sec: Optional[int] = None,
         delete_when_done: bool = False,
         disk_image: str = DEFAULT_DISK_IMAGE,
-        disk_size: int = 1000,  # <- (Gigabytes) minimum is 1000 due to disk image
+        disk_size: int = 10,  # <- (Gigabytes) minimum is 10 due to disk image
         instance_client: Optional[InstancesClient] = None,
     ):
         """
         TODO: Node should only start the exact containers it needs in this situation instead
-        of all of them. This will dramatically cut startup time.
+        of all of them. This should dramatically cut startup time.
         """
         self = cls._init(
             db=db,
@@ -300,16 +270,16 @@ class Node:
             instance_name=instance_name,
             machine_type=machine_type,
             containers=containers,
-            started_booting_at=datetime.now(TZ),
+            started_booting_at=time(),
             current_job=job_id,
             parallelism=parallelism,
+            inactivity_shutdown_time_sec=inactivity_shutdown_time_sec,
             delete_when_done=delete_when_done,
             instance_client=instance_client,
         )
         self.is_booting = True
         self.update_state_in_db()
-        self.logger.log(f"node {instance_name} written to db.")
-        self._start(disk_image=disk_image, disk_size=disk_size)
+        self.__start(disk_image=disk_image, disk_size=disk_size)
         self.execute(
             job_id=self.current_job,
             parallelism=parallelism,
@@ -318,116 +288,10 @@ class Node:
         )
         return self
 
-    @classmethod
-    def start(
-        cls,
-        db: firestore.Client,
-        logger: Logger,
-        add_background_task: Callable,
-        machine_type: str,
-        instance_name: Optional[str] = None,
-        containers: Optional[list[Container]] = None,
-        disk_image: str = DEFAULT_DISK_IMAGE,
-        disk_size: int = 10,  # <- (Gigabytes) minimum is 10 due to disk image
-        instance_client: Optional[InstancesClient] = None,
-    ):
-        self = cls._init(
-            db=db,
-            logger=logger,
-            add_background_task=add_background_task,
-            instance_name=instance_name,
-            machine_type=machine_type,
-            containers=containers,
-            started_booting_at=datetime.now(TZ),
-            instance_client=instance_client,
-        )
-        self.is_booting = True
-        self.update_state_in_db()
-        self._start(disk_image=disk_image, disk_size=disk_size)
-        return self
-
     def time_until_booted(self):
-        time_spent_booting = datetime.now(TZ) - self.started_booting_at
+        time_spent_booting = time() - self.started_booting_at
         time_until_booted = TOTAL_BOOT_TIME - time_spent_booting
         return max(0, time_until_booted)
-
-    def _start(self, disk_image: str, disk_size: int):
-        disk_params = AttachedDiskInitializeParams(source_image=disk_image, disk_size_gb=disk_size)
-        disk = AttachedDisk(auto_delete=True, boot=True, initialize_params=disk_params)
-
-        network_name = "global/networks/default"
-        access_config = AccessConfig(name="External NAT", type="ONE_TO_ONE_NAT")
-        network_interface = NetworkInterface(name=network_name, access_configs=[access_config])
-
-        scheduling = Scheduling(provisioning_model="SPOT", instance_termination_action="DELETE")
-
-        access_anything_scope = "https://www.googleapis.com/auth/cloud-platform"
-        service_account = ServiceAccount(email=GCE_DEFAULT_SVC, scopes=[access_anything_scope])
-
-        startup_script = get_startup_script(self.instance_name)
-        shutdown_script = get_shutdown_script(self.instance_name)
-        startup_script_metadata = Items(key="startup-script", value=startup_script)
-        shutdown_script_metadata = Items(key="shutdown-script", value=shutdown_script)
-        for zone in ACCEPTABLE_ZONES:
-            try:
-                instance = Instance(
-                    name=self.instance_name,
-                    machine_type=f"zones/{zone}/machineTypes/{self.machine_type}",
-                    disks=[disk],
-                    network_interfaces=[network_interface],
-                    service_accounts=[service_account],
-                    metadata=Metadata(items=[startup_script_metadata, shutdown_script_metadata]),
-                    tags=Tags(items=["burla-cluster-node"]),
-                    scheduling=scheduling,
-                )
-                self.instance_client.insert(
-                    project=PROJECT_ID, zone=zone, instance_resource=instance
-                ).result()
-                instance_created = True
-                break
-
-            except ServiceUnavailable:  # <- not enough instances in this zone.
-                instance_created = False
-            except Conflict:  # <- means vm was deleted while starting.
-                node = self.db.collection("nodes").document(self.instance_name).get().to_dict()
-                node_is_deleting = (node or {}).get("is_deleting") == True
-                node_was_deleted = (node or {}).get("deleted_at")
-                deletion_is_justified = node and (node_is_deleting or node_was_deleted)
-
-                if deletion_is_justified:
-                    raise JustifiedDeletion(f"Node {self.instance_name} deleted while starting.")
-                else:
-                    msg = f"UNJUSTIFIED DELETION: Node {self.instance_name} deleted while starting."
-                    raise UnjustifiedDeletion(msg)
-
-        if not instance_created:
-            raise Exception(f"Unable to provision {instance} in any of: {ACCEPTABLE_ZONES}")
-
-        instance = self.instance_client.get(
-            project=PROJECT_ID, zone=zone, instance=self.instance_name
-        )
-        external_ip = instance.network_interfaces[0].access_configs[0].nat_i_p
-
-        self.host = f"http://{external_ip}:{NODE_SVC_PORT}"
-        self.zone = zone
-
-        start = time()
-        status = self.status()
-        while status != "READY":
-            sleep(1)
-            status = self.status()
-            if status == "FAILED":
-                self.delete()
-                raise Exception(f"Node {self.instance_name} Failed to start!")
-            if status == "PLEASE_REBOOT":
-                self.reboot()  # <- node doesn't boot containers automatically
-            if (time() - start) > 60 * 3:
-                self.delete()
-                raise Exception(f"Node {self.instance_name} not booted after 3 minutes.")
-
-        self.is_booting = False
-        self.finished_booting_at = datetime.now(TZ)
-        self.update_state_in_db()
 
     def update_state_in_db(self):
         node_ref = self.db.collection("nodes").document(self.instance_name)
@@ -442,7 +306,7 @@ class Node:
         if node_previously_deleted:
             return
         elif node_just_deleted:
-            current_state["deleted_at"] = SERVER_TIMESTAMP
+            current_state["deleted_at"] = time()
 
         if node_is_new:
             node_ref.set(current_state)
@@ -477,6 +341,7 @@ class Node:
             current_job=self.current_job,
             parallelism=self.parallelism,
             containers=[container.to_dict() for container in self.containers] or None,
+            inactivity_shutdown_time_sec=self.inactivity_shutdown_time_sec,
             delete_when_done=self.delete_when_done,
             started_booting_at=self.started_booting_at,
             finished_booting_at=self.finished_booting_at,
@@ -508,15 +373,14 @@ class Node:
         self.update_state_in_db()
 
     def reboot(self):
+        """Ignores 409 http errors (thrown when node already rebooting)"""
         containers_json = [container.to_dict() for container in self.containers]
         response = requests.post(f"{self.host}/reboot", json=containers_json)
-        response.raise_for_status()
+        if response.status_code != 409:
+            response.raise_for_status()
         self.is_booting = True
 
         status = self.status()
-        if status == "PLEASE_REBOOT":
-            sleep(1)
-            status = self.status()
 
         # confirm node is rebooting
         if status not in ["BOOTING", "READY"]:
@@ -527,7 +391,7 @@ class Node:
             if status == "FAILED":
                 self.delete()
                 raise Exception(f"Node {self.instance_name} Failed to start!")
-            elif status != ["BOOTING"]:
+            elif status != "BOOTING":
                 raise Exception(f"UNEXPECTED STATE WHILE BOOTING: {status}")
             else:
                 sleep(5)
@@ -558,17 +422,11 @@ class Node:
 
     def status(self, timeout=1, timeout_remaining=None):
         """
-        Returns one of: `PLEASE_REBOOT`, `BOOTING`, `RUNNING`, `READY`, `FAILED`, `DELETING`.
+        Returns one of: `BOOTING`, `RUNNING`, `READY`, `FAILED`, `DELETING`.
         """
-
-        # TODO: nodes should manage their own document in the node service after it is created
-        # in this classes constructor. This function should use that document to tell whether
-        # non-responses are failures or reboots.
-
         start = time()
         timeout_remaining = timeout if timeout_remaining is None else timeout_remaining
         has_timed_out = timeout_remaining < 0
-
         status = None
 
         if self.host is not None:
@@ -606,11 +464,6 @@ class Node:
         return job_status
 
     def delete(self):
-        """
-        TODO:
-        Should "gracefully" stop any subjob executors first, to prevent half/executed subjobs.
-        ^^ is not urgent because nodes almost always not deleted while executing ??
-        """
         self.is_deleting = True
         try:
             self.instance_client.delete(
@@ -626,3 +479,141 @@ class Node:
         self.is_deleting = True
         self.update_state_in_db()
         self.add_background_task(self.delete)
+
+    def __start(self, disk_image: str, disk_size: int):
+        disk_params = AttachedDiskInitializeParams(source_image=disk_image, disk_size_gb=disk_size)
+        disk = AttachedDisk(auto_delete=True, boot=True, initialize_params=disk_params)
+
+        network_name = "global/networks/default"
+        access_config = AccessConfig(name="External NAT", type="ONE_TO_ONE_NAT")
+        network_interface = NetworkInterface(name=network_name, access_configs=[access_config])
+
+        scheduling = Scheduling(provisioning_model="SPOT", instance_termination_action="DELETE")
+
+        access_anything_scope = "https://www.googleapis.com/auth/cloud-platform"
+        service_account = ServiceAccount(email=GCE_DEFAULT_SVC, scopes=[access_anything_scope])
+
+        startup_script = self.__get_startup_script()
+        shutdown_script = self.__get_shutdown_script()
+        startup_script_metadata = Items(key="startup-script", value=startup_script)
+        shutdown_script_metadata = Items(key="shutdown-script", value=shutdown_script)
+        for zone in ACCEPTABLE_ZONES:
+            try:
+                instance = Instance(
+                    name=self.instance_name,
+                    machine_type=f"zones/{zone}/machineTypes/{self.machine_type}",
+                    disks=[disk],
+                    network_interfaces=[network_interface],
+                    service_accounts=[service_account],
+                    metadata=Metadata(items=[startup_script_metadata, shutdown_script_metadata]),
+                    tags=Tags(items=["burla-cluster-node"]),
+                    scheduling=scheduling,
+                )
+                self.instance_client.insert(
+                    project=PROJECT_ID, zone=zone, instance_resource=instance
+                ).result()
+                instance_created = True
+                break
+
+            except ServiceUnavailable:  # <- not enough instances in this zone.
+                instance_created = False
+            except Conflict:  # <- means vm was deleted while starting.
+                node = self.db.collection("nodes").document(self.instance_name).get().to_dict()
+                node_is_deleting = (node or {}).get("is_deleting") == True
+                node_was_deleted = (node or {}).get("deleted_at")
+                deletion_is_justified = node and (node_is_deleting or node_was_deleted)
+
+                # when is "deletion justified" ?
+                # sometimes master svc will realize it doesent need a node just after requesting it
+                # example: job needs more parallelism, then finishes before new node is ready
+                if deletion_is_justified:
+                    raise JustifiedDeletion(f"Node {self.instance_name} deleted while starting.")
+                else:
+                    msg = f"UNJUSTIFIED DELETION: Node {self.instance_name} deleted while starting."
+                    raise UnjustifiedDeletion(msg)
+
+        if not instance_created:
+            raise Exception(f"Unable to provision {instance} in any of: {ACCEPTABLE_ZONES}")
+
+        instance = self.instance_client.get(
+            project=PROJECT_ID, zone=zone, instance=self.instance_name
+        )
+        external_ip = instance.network_interfaces[0].access_configs[0].nat_i_p
+
+        self.host = f"http://{external_ip}:{NODE_SVC_PORT}"
+        self.zone = zone
+
+        start = time()
+        status = self.status()
+        while status != "READY":
+            sleep(1)
+            status = self.status()
+            if status == "FAILED":
+                self.delete()
+                raise Exception(f"Node {self.instance_name} Failed to start!")
+            if (time() - start) > 60 * 3:
+                self.delete()
+                raise Exception(f"Node {self.instance_name} not booted after 3 minutes.")
+
+        self.is_booting = False
+        self.finished_booting_at = time()
+        self.update_state_in_db()
+
+    def __get_startup_script(self):
+        return f"""
+        #! /bin/bash
+        # This script installs and starts the node service
+        
+        # Increases max num open files so we can have more connections open.
+        # ulimit -n 4096 # baked into image when I built `burla-cluster-node-image-5`
+
+        gcloud config set account {GCE_DEFAULT_SVC}
+
+        git clone --depth 1 --branch {NODE_SVC_VERSION} https://github.com/Burla-Cloud/node_service.git
+        cd node_service
+        python3.11 -m pip install --break-system-packages .
+        echo "Done installing packages."
+
+        export IN_PROD="{IN_PROD}"
+        export INSTANCE_NAME="{self.instance_name}"
+        export PROJECT_ID="{PROJECT_ID}"
+        export CONTAINERS='{json.dumps([c.to_dict() for c in self.containers])}'
+        export INACTIVITY_SHUTDOWN_TIME_SEC="{self.inactivity_shutdown_time_sec}"
+
+        python3.11 -m uvicorn node_service:app --host 0.0.0.0 --port 8080 --workers 1 --timeout-keep-alive 600
+        """
+
+    def __get_shutdown_script(self):
+        firestore_base_url = "https://firestore.googleapis.com"
+        firestore_db_url = f"{firestore_base_url}/v1/projects/{PROJECT_ID}/databases/(default)"
+        firestore_document_url = f"{firestore_db_url}/documents/nodes/{self.instance_name}"
+        return f"""
+        #! /bin/bash
+        # This script marks the node as "DELETED" in the database when the vm instance is shutdown.
+        # This is necessary due to situations where instances are preempted,
+        # otherwise the `main_service` doesn't know which vm's are still running when starting a job,
+        # checking if they are still running is too slow, increasing latency.
+
+        # record environment variable indicating whether this instance was preempted.
+        preempted_instances_matching_filter=$( \
+            gcloud compute operations list \
+            --filter="operationType=compute.instances.preempted AND targetLink:instances/{self.instance_name}" \
+        )
+        # Set PREEMPTED to true if the output is non-empty, otherwise false
+        export PREEMPTED=$([ -n "$preempted_instances_matching_filter" ] && echo true || echo false)
+
+        curl -X PATCH \
+        -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+        -H "Content-Type: application/json" \
+        -d '{{
+            "fields": {{
+                "status": {{
+                    "stringValue": "DELETED"
+                }},
+                "preempted": {{
+                    "booleanValue": '"$PREEMPTED"'
+                }}
+            }}
+        }}' \
+        "{firestore_document_url}?updateMask.fieldPaths=status&updateMask.fieldPaths=preempted"
+        """

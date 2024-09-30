@@ -6,12 +6,11 @@ from typing import Optional, Callable
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, Path, Depends
-from fastapi.responses import JSONResponse
-from google.cloud.firestore import FieldFilter, SERVER_TIMESTAMP, Increment
+from fastapi.responses import JSONResponse, Response
+from google.cloud.firestore import FieldFilter, Increment
 
 
 from main_service import (
-    JOB_ENV_REPO,
     DB,
     get_user_email,
     get_logger,
@@ -19,8 +18,11 @@ from main_service import (
     get_request_files,
     get_add_background_task_function,
 )
-from main_service.cluster import Cluster, parallelism_capacity, reboot_nodes_with_job, reconcile
-from main_service.env_builder import start_building_environment
+from main_service.cluster import (
+    parallelism_capacity,
+    reboot_nodes_with_job,
+    async_ensure_reconcile,
+)
 from main_service.helpers import validate_create_job_request, Logger
 
 router = APIRouter()
@@ -34,53 +36,10 @@ def create_job(
     logger: Logger = Depends(get_logger),
     add_background_task: Callable = Depends(get_add_background_task_function),
 ):
-    create_request_receive = time()
-    logger.log(f"received request to create job.")
     validate_create_job_request(request_json)
 
-    job_id = str(uuid4())
-    job_ref = DB.collection("jobs").document(job_id)
-    n_inputs = int(request_json["n_inputs"])
-    function_in_gcs = not bool(request_files)
-    image = request_json["image"]
-    if (image is None) and not request_json["func_gpu"]:
-        image = f"{JOB_ENV_REPO}/image-nogpu:latest"
-    elif (image is None) and request_json["func_gpu"]:
-        image = f"{JOB_ENV_REPO}/image-gpu:latest"
-
-    job_ref.set(
-        {
-            "n_sub_jobs": n_inputs,
-            "inputs_id": request_json["inputs_id"],
-            "function_in_gcs": function_in_gcs,
-            "func_cpu": request_json["func_cpu"],
-            "func_ram": request_json["func_ram"],
-            "func_gpu": request_json["func_gpu"],
-            "target_parallelism": request_json["parallelism"],
-            "current_parallelism": 0,
-            "user": user_email,
-            "started_at": SERVER_TIMESTAMP,
-            "started_at_ts": time(),
-            "ended_at": None,
-            "udf_errors": [],
-            "burla_client_version": request_json["burla_version"],
-            "env": {
-                "is_copied_from_client": False,
-                "image": image,
-                "python_version": request_json["python_version"],
-            },
-            "benchmark": {"create_job_request_received": create_request_receive},
-        }
-    )
-
-    # if request_json.get("packages"):
-    #     start_building_environment(request_json["packages"], job_ref, job_id, image=image)
-
-    # figure out which nodes will work on this job & at what parallelism
-    job_ref.update({f"benchmark.node_assignment_begin": time()})
-    ready_nodes_filter = FieldFilter("status", "==", "READY")
-    ready_nodes = list(DB.collection("nodes").where(filter=ready_nodes_filter).stream())
-
+    node_filter = FieldFilter("status", "==", "READY")
+    ready_nodes = [n.to_dict() for n in DB.collection("nodes").where(filter=node_filter).stream()]
     if len(ready_nodes) == 0:
         msg = "Zero nodes with state `READY` are currently available."
         content = {"error_type": "NoReadyNodes", "message": msg}
@@ -88,143 +47,117 @@ def create_job(
 
     planned_future_job_parallelism = 0
     nodes_to_assign = []
-    for node_ref in ready_nodes:
-        node_doc = node_ref.to_dict()
+    for node in ready_nodes:
+        parallelism_deficit = request_json["max_parallelism"] - planned_future_job_parallelism
         max_node_parallelism = parallelism_capacity(
-            node_doc["machine_type"],
-            request_json["func_cpu"],
-            request_json["func_ram"],
-            request_json["func_gpu"],
+            node["machine_type"], request_json["func_cpu"], request_json["func_ram"]
         )
 
-        if max_node_parallelism > 0:
-            parallelism_deficit = request_json["parallelism"] - planned_future_job_parallelism
+        if max_node_parallelism > 0 and parallelism_deficit > 0:
             node_target_parallelism = min(parallelism_deficit, max_node_parallelism)
-            node_doc["target_parallelism"] = node_target_parallelism
-            nodes_to_assign.append(node_doc)
+            node["target_parallelism"] = node_target_parallelism
+            node["starting_index"] = planned_future_job_parallelism  # idx to start work at
             planned_future_job_parallelism += node_target_parallelism
-            add_background_task(
-                node_ref.reference.update, dict(target_parallelism=node_target_parallelism)
-            )
+            nodes_to_assign.append(node)
+
+    job_id = str(uuid4())
+    job_ref = DB.collection("jobs").document(job_id)
+    job_ref.set(
+        {
+            "n_inputs": int(request_json["n_inputs"]),
+            "inputs_id": request_json["inputs_id"],
+            "func_cpu": request_json["func_cpu"],
+            "func_ram": request_json["func_ram"],
+            "burla_client_version": request_json["burla_version"],
+            "user_python_version": request_json["python_version"],
+            "target_parallelism": request_json["max_parallelism"],
+            "current_parallelism": 0,
+            "planned_future_job_parallelism": planned_future_job_parallelism,
+            "user": user_email,
+            "started_at": time(),
+            "udf_errors": [],
+        }
+    )
 
     if len(nodes_to_assign) == 0:
-        msg = "No compatible nodes available."
-        content = {"error_type": "NoCompatibleNodes", "message": msg}
+        content = {"error_type": "NoCompatibleNodes", "message": "No compatible nodes available."}
         return JSONResponse(content=content, status_code=503)
 
-    if request_json["parallelism"] > planned_future_job_parallelism:
-        # TODO: start more nodes here to fill the gap
-        parallelism_deficit = request_json["parallelism"] - planned_future_job_parallelism
+    if request_json["max_parallelism"] > planned_future_job_parallelism:
+        # TODO: start more nodes here to fill the gap ?
+        parallelism_deficit = request_json["max_parallelism"] - planned_future_job_parallelism
         msg = f"Cluster needs {parallelism_deficit} more cpus, "
         msg += f"continuing with a parallelism of {planned_future_job_parallelism}."
         logger.log(msg, severity="WARNING")
 
-    # concurrently ask them all to start work:
-    def assign_node(node_doc: dict):
+    # concurrently ask all ready nodes to start work:
+    def assign_node(node: dict):
         """Errors in here are raised correctly!"""
-        payload = {"parallelism": node_doc["target_parallelism"]}
-        if function_in_gcs:
-            response = requests.post(f"{node_doc['host']}/jobs/{job_id}", json=payload)
-        else:
-            files = dict(function_pkl=request_files["function_pkl"])
-            data = dict(request_json=json.dumps(payload))
-            url = f"{node_doc['host']}/jobs/{job_id}"
-            response = requests.post(url, files=files, data=data)
+        parallelism = node["target_parallelism"]
+        starting_index = node["starting_index"]
+        payload = {"parallelism": parallelism, "starting_index": starting_index}
+        data = dict(request_json=json.dumps(payload))
+        files = dict(function_pkl=request_files["function_pkl"])
+        response = requests.post(f"{node['host']}/jobs/{job_id}", files=files, data=data)
 
-        error = False
         try:
             response.raise_for_status()
         except Exception as e:
             # Any errors returned here should also be raised inside the node service.
             # Errors here shouldn't kill the job because some workers are often able to start.
             # Nodes returning errors here should be restarted.
-            error = True
-            msg = f"Node {node_doc['instance_name']} refused job with error: {e}"
+            msg = f"Node {node['instance_name']} refused job with error: {e}"
             logger.log(msg, severity="WARNING")
-
-        if not error:
-            logger.log(f"Assigned node {node_doc['instance_name']} to job {job_id}.")
-            return node_doc["target_parallelism"]
-        else:
             return 0
 
-    with ThreadPoolExecutor() as executor:
-        current_parallelism = sum(list(executor.map(assign_node, nodes_to_assign)))
+        logger.log(f"Assigned node {node['instance_name']} to job {job_id}.")
+        return node["target_parallelism"]
 
-    new_job_info = {"current_parallelism": Increment(current_parallelism)}
-    add_background_task(job_ref.update, new_job_info)
+    with ThreadPoolExecutor(max_workers=32) as executor:
+        current_parallelism = sum(list(executor.map(assign_node, nodes_to_assign)))
 
     if current_parallelism == 0:
         add_background_task(reboot_nodes_with_job, DB, job_id)
-        add_background_task(reconcile, DB, logger, add_background_task)
+        async_ensure_reconcile(DB, logger, add_background_task)
         content = {"error_type": "JobRefused", "message": "Job refused by all available nodes."}
         return JSONResponse(content=content, status_code=503)
-
-    job_ref.update({"benchmark.create_job_response": time()})
-    return {"job_id": job_id}
+    else:
+        new_job_info = {"current_parallelism": Increment(current_parallelism)}
+        add_background_task(job_ref.update, new_job_info)
+        return {"job_id": job_id}
 
 
 @router.get("/v1/jobs/{job_id}")
-def get_job_info(
+def run_job_healthcheck(
     job_id: str = Path(...),
     logger: Logger = Depends(get_logger),
     add_background_task: Callable = Depends(get_add_background_task_function),
 ):
-    job_ref = DB.collection("jobs").document(job_id)
-    job = job_ref.get().to_dict()
+    # if not already happening, modify current cluster state -> correct/optimal state:
+    async_ensure_reconcile(DB, logger, add_background_task)
 
-    # udf_error ?  (error in user's code)
-    if job.get("udf_errors"):
-        # TODO: Send all errors (& indicies) if there are multiple ! (instead of just first error)
-        input_index = job["udf_errors"][0]["input_index"]
-        udf_error = job["udf_errors"][0]["udf_error"]
-        logger.log(f"received an error in UDF with input at index {input_index} for job `{job_id}`")
-        return {"udf_error": udf_error}
+    all_workers_done = False
+    any_workers_failed = False
+    workers_done_but_job_isnt = False
 
-    # install_error ?  (error in user's environment)
-    install_error = job.get("env", {}).get("install_error")
-    if install_error:
-        logger.log(f"received install error for job `{job_id}`")
-        return {"install_error": install_error}
+    # check status of every node / worker working on this job
+    _filter = FieldFilter("current_job", "==", job_id)
+    nodes_with_job = [n.to_dict() for n in DB.collection("nodes").where(filter=_filter).stream()]
+    no_nodes_working_on_job = len(nodes_with_job) == 0
+    for node in nodes_with_job:
+        response = requests.get(f"{node['host']}/jobs/{job_id}")
+        response.raise_for_status()
+        any_workers_failed = response.json()["any_workers_failed"]
+        all_workers_done = response.json()["all_workers_done"]
 
-    # server error ?  (error in burla's code)
-    cluster = Cluster.from_database(db=DB, logger=logger, add_background_task=add_background_task)
-    if cluster.status(job_id=job_id) == "FAILED":
-        logger.log(f"Received a server error (not a UDF error) for job `{job_id}`!")
+    # This should almost never be true because the client should stop doing healthchecks
+    # before it is. Also because nodes restart themself when they are done, unassigning their job.
+    # If it is true check if all outputs are in the DB, if not something is wrong!
+    if all_workers_done:
+        job_doc_ref = DB.collection("jobs").document(job_id)
+        n_inputs = job_doc_ref.get().to_dict()["n_inputs"]
+        n_outputs = job_doc_ref.collection("outputs").count().get()[0][0].value
+        workers_done_but_job_isnt = n_inputs != n_outputs
+
+    if no_nodes_working_on_job or any_workers_failed or workers_done_but_job_isnt:
         return Response(status_code=500)
-
-
-@router.post("/v1/jobs/{job_id}/ended")
-def report_job_ended(
-    job_id: str = Path(...),
-    request_json: dict = Depends(get_request_json),
-    logger: Logger = Depends(get_logger),
-    add_background_task: Callable = Depends(get_add_background_task_function),
-):
-    add_background_task(reconcile, DB, logger, add_background_task)
-    reboot_nodes_with_job(DB, job_id)
-
-    # Record/print metrics
-    job_ref = DB.collection("jobs").document(job_id)
-    benchmark = job_ref.get().to_dict()["benchmark"]
-    benchmark.update(request_json.items())
-
-    rpm_call_time = benchmark.pop("rpm_call_time")
-    benchmark_sorted = dict(sorted(benchmark.items(), key=lambda item: item[1]))
-    max_key_length = max(len(str(item[0])) for item in benchmark_sorted.items())
-
-    padding = " " * (max_key_length - len("RPM called at"))
-    print(f"\nRPM called at:{padding}\tT+0.0s")
-
-    last_ts = rpm_call_time
-    for checkpoint, ts in benchmark_sorted.items():
-        padding = " " * (max_key_length - len(checkpoint))
-        time_since_start = round(ts - rpm_call_time, 1)
-        time_since_last = round(ts - last_ts, 1)
-        print(f"{checkpoint}:{padding}\tT+{time_since_start}s\tL+{time_since_last}s")
-        last_ts = ts
-
-    padding = " " * (max_key_length - len("Total e2e runtime"))
-    print(f"Total e2e runtime:{padding}\t{benchmark['job_ended_ts']-rpm_call_time}s\n")
-
-    return {}
