@@ -167,8 +167,8 @@ def reconcile(db: firestore.Client, logger: Logger, add_background_task: Callabl
             # job is still active?
             job_doc_ref = db.collection("jobs").document(node.current_job)
             job = job_doc_ref.get().to_dict()
-            n_outputs = job_doc_ref.collection("outputs").count().get()[0][0].value
-            job_ended = n_outputs == job["n_inputs"]
+            n_results = job_doc_ref.collection("results").count().get()[0][0].value
+            job_ended = n_results == job["n_inputs"]
             if job_ended:
                 msg = f"Rebooting node {node.instance_name}"
                 logger.log(msg + f"because it's job ({node.current_job}) has ended.")

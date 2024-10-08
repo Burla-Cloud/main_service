@@ -6,7 +6,7 @@ from typing import Optional, Callable
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, Path, Depends
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse
 from google.cloud.firestore import FieldFilter, Increment
 
 
@@ -75,7 +75,6 @@ def create_job(
             "planned_future_job_parallelism": planned_future_job_parallelism,
             "user": user_email,
             "started_at": time(),
-            "udf_errors": [],
         }
     )
 
@@ -136,28 +135,13 @@ def run_job_healthcheck(
     # if not already happening, modify current cluster state -> correct/optimal state:
     async_ensure_reconcile(DB, logger, add_background_task)
 
-    all_workers_done = False
-    any_workers_failed = False
-    workers_done_but_job_isnt = False
-
-    # check status of every node / worker working on this job
+    # get all nodes working on this job
     _filter = FieldFilter("current_job", "==", job_id)
     nodes_with_job = [n.to_dict() for n in DB.collection("nodes").where(filter=_filter).stream()]
-    no_nodes_working_on_job = len(nodes_with_job) == 0
+
+    # check status of every node / worker working on this job
     for node in nodes_with_job:
         response = requests.get(f"{node['host']}/jobs/{job_id}")
         response.raise_for_status()
-        any_workers_failed = response.json()["any_workers_failed"]
-        all_workers_done = response.json()["all_workers_done"]
-
-    # This should almost never be true because the client should stop doing healthchecks
-    # before it is. Also because nodes restart themself when they are done, unassigning their job.
-    # If it is true check if all outputs are in the DB, if not something is wrong!
-    if all_workers_done:
-        job_doc_ref = DB.collection("jobs").document(job_id)
-        n_inputs = job_doc_ref.get().to_dict()["n_inputs"]
-        n_outputs = job_doc_ref.collection("outputs").count().get()[0][0].value
-        workers_done_but_job_isnt = n_inputs != n_outputs
-
-    if no_nodes_working_on_job or any_workers_failed or workers_done_but_job_isnt:
-        return Response(status_code=500)
+        if response.json()["any_workers_failed"]:
+            raise Exception(f"Worker failed. Check logs for node {node['instance_name']}")

@@ -241,53 +241,6 @@ class Node:
         self.__start(disk_image=disk_image, disk_size=disk_size)
         return self
 
-    @classmethod
-    def start_and_execute(
-        cls,
-        db: firestore.Client,
-        logger: Logger,
-        add_background_task: Callable,
-        machine_type: str,
-        job_id: str,
-        parallelism: int,
-        function_pkl: Optional[bytes] = None,
-        instance_name: Optional[str] = None,
-        containers: Optional[list[Container]] = None,
-        inactivity_shutdown_time_sec: Optional[int] = None,
-        delete_when_done: bool = False,
-        disk_image: str = DEFAULT_DISK_IMAGE,
-        disk_size: int = 10,  # <- (Gigabytes) minimum is 10 due to disk image
-        instance_client: Optional[InstancesClient] = None,
-    ):
-        """
-        TODO: Node should only start the exact containers it needs in this situation instead
-        of all of them. This should dramatically cut startup time.
-        """
-        self = cls._init(
-            db=db,
-            logger=logger,
-            add_background_task=add_background_task,
-            instance_name=instance_name,
-            machine_type=machine_type,
-            containers=containers,
-            started_booting_at=time(),
-            current_job=job_id,
-            parallelism=parallelism,
-            inactivity_shutdown_time_sec=inactivity_shutdown_time_sec,
-            delete_when_done=delete_when_done,
-            instance_client=instance_client,
-        )
-        self.is_booting = True
-        self.update_state_in_db()
-        self.__start(disk_image=disk_image, disk_size=disk_size)
-        self.execute(
-            job_id=self.current_job,
-            parallelism=parallelism,
-            function_pkl=function_pkl,
-            delete_when_done=self.delete_when_done,
-        )
-        return self
-
     def time_until_booted(self):
         time_spent_booting = time() - self.started_booting_at
         time_until_booted = TOTAL_BOOT_TIME - time_spent_booting
@@ -350,76 +303,6 @@ class Node:
             deleted_at=None,
         )
 
-    def execute(
-        self,
-        job_id: str,
-        parallelism: int,
-        function_pkl: Optional[bytes] = None,
-        delete_when_done: bool = False,
-    ):
-        self.delete_when_done = delete_when_done  # <- actual deletion handled in Cluster.status
-        self.current_job = job_id
-
-        payload = {"parallelism": parallelism}
-        if function_pkl:
-            files = dict(function_pkl=function_pkl)
-            data = dict(request_json=json.dumps(payload))
-            response = requests.post(f"{self.host}/jobs/{job_id}", files=files, data=data)
-        else:
-            response = requests.post(f"{self.host}/jobs/{job_id}", json=payload)
-        response.raise_for_status()
-
-        self.parallelism = parallelism
-        self.update_state_in_db()
-
-    def reboot(self):
-        """Ignores 409 http errors (thrown when node already rebooting)"""
-        containers_json = [container.to_dict() for container in self.containers]
-        response = requests.post(f"{self.host}/reboot", json=containers_json)
-        if response.status_code != 409:
-            response.raise_for_status()
-        self.is_booting = True
-
-        status = self.status()
-
-        # confirm node is rebooting
-        if status not in ["BOOTING", "READY"]:
-            raise Exception(f"Node {self.instance_name} failed start rebooting! status={status}")
-
-        # poll status until done rebooting:
-        while status != "READY":
-            if status == "FAILED":
-                self.delete()
-                raise Exception(f"Node {self.instance_name} Failed to start!")
-            elif status != "BOOTING":
-                raise Exception(f"UNEXPECTED STATE WHILE BOOTING: {status}")
-            else:
-                sleep(5)
-                status = self.status()
-        self.is_booting = False
-
-    def async_reboot(self):
-        self.add_background_task(self.reboot)
-
-    def reboot_and_execute(
-        self,
-        job_id: str,
-        parallelism: int,
-        function_pkl: Optional[bytes] = None,
-        delete_when_done: bool = False,
-    ):
-        if self.status() != "READY":  # <- if status is "READY" node must have already rebooted.
-            self.reboot()
-        self.execute(
-            job_id=job_id,
-            parallelism=parallelism,
-            function_pkl=function_pkl,
-            delete_when_done=delete_when_done,
-        )
-
-    def async_reboot_and_execute(self, *a, **kw):
-        self.add_background_task(self.reboot_and_execute, *a, **kw)
-
     def status(self, timeout=1, timeout_remaining=None):
         """
         Returns one of: `BOOTING`, `RUNNING`, `READY`, `FAILED`, `DELETING`.
@@ -451,34 +334,6 @@ class Node:
             return self.status(timeout=timeout, timeout_remaining=timeout_remaining - elapsed_time)
         else:
             return status
-
-    def job_status(self, job_id: str):
-        """Returns: `all_subjobs_done: bool, any_subjobs_failed: bool`"""
-        response = requests.get(f"{self.host}/jobs/{job_id}")
-        response.raise_for_status()
-        job_status = response.json()
-
-        if job_status["all_subjobs_done"] or job_status["any_subjobs_failed"]:
-            self.update_state_in_db()
-
-        return job_status
-
-    def delete(self):
-        self.is_deleting = True
-        try:
-            self.instance_client.delete(
-                project=PROJECT_ID, zone=self.zone, instance=self.instance_name
-            )
-        except (NotFound, ValueError):
-            pass
-
-        self._deleted = True
-        self.update_state_in_db()
-
-    def async_delete(self):
-        self.is_deleting = True
-        self.update_state_in_db()
-        self.add_background_task(self.delete)
 
     def __start(self, disk_image: str, disk_size: int):
         disk_params = AttachedDiskInitializeParams(source_image=disk_image, disk_size_gb=disk_size)
@@ -547,13 +402,18 @@ class Node:
         status = self.status()
         while status != "READY":
             sleep(1)
+            booting_too_long = (time() - start) > 60 * 3
             status = self.status()
-            if status == "FAILED":
-                self.delete()
-                raise Exception(f"Node {self.instance_name} Failed to start!")
-            if (time() - start) > 60 * 3:
-                self.delete()
-                raise Exception(f"Node {self.instance_name} not booted after 3 minutes.")
+
+            if status == "FAILED" or booting_too_long:
+                try:
+                    kwargs = dict(project=PROJECT_ID, zone=self.zone, instance=self.instance_name)
+                    self.instance_client.delete(**kwargs)
+                except (NotFound, ValueError):
+                    pass
+                self._deleted = True
+                msg = f"Node {self.instance_name} Failed to start! (timeout={booting_too_long})"
+                raise Exception(msg)
 
         self.is_booting = False
         self.finished_booting_at = time()
