@@ -7,7 +7,6 @@ from time import time
 from typing import Callable
 from requests.exceptions import HTTPError
 
-import pytz
 from google.cloud import firestore, logging
 from fastapi.responses import Response, FileResponse, RedirectResponse
 from fastapi import FastAPI, Request, BackgroundTasks, Depends
@@ -20,13 +19,11 @@ os.environ["GRPC_VERBOSITY"] = "ERROR"
 os.environ["GLOG_minloglevel"] = "2"
 
 
-TZ = pytz.timezone("America/New_York")
 IN_DEV = os.environ.get("IN_DEV") == "True"
 IN_PROD = os.environ.get("IN_PROD") == "True"
 assert not (IN_DEV and IN_PROD)
 
 PROJECT_ID = "burla-prod" if IN_PROD else os.environ.get("PROJECT_ID")
-JOBS_BUCKET = f"burla-jobs--{PROJECT_ID}"
 JOB_ENV_REPO = f"us-docker.pkg.dev/{PROJECT_ID}/burla-job-containers/default"
 BURLA_BACKEND_URL = "https://backend.burla.dev"
 
@@ -35,14 +32,9 @@ os.environ["GRPC_VERBOSITY"] = "ERROR"  # gRPC streams throw some unblockable an
 # reduces number of instances / saves across some requests as opposed to using Depends
 GCL_CLIENT = logging.Client().logger("main_service")
 DB = firestore.Client(project=PROJECT_ID)
-test_db = firestore.Client(project="joe-test-407923")
 
 
-from main_service.helpers import (
-    validate_headers_and_login,
-    Logger,
-    format_traceback,
-)
+from main_service.helpers import validate_headers_and_login, Logger, format_traceback
 
 
 async def get_request_json(request: Request):
@@ -54,9 +46,7 @@ async def get_request_json(request: Request):
 
 
 async def get_request_files(request: Request):
-    """
-    If request is multipart/form data load all files and returns as dict of {filename: bytes}
-    """
+    """Used to send UDF, returns as dict of {filename: bytes}"""
     form_data = await request.form()
     files = {}
     for key, value in form_data.items():

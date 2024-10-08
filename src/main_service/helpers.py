@@ -1,11 +1,9 @@
 import sys
 import requests
-import traceback
 from itertools import groupby
-from typing import Callable
 from datetime import datetime, timedelta, timezone
 
-from fastapi import Request, HTTPException, BackgroundTasks
+from fastapi import Request, HTTPException
 from google.cloud.secretmanager import SecretManagerServiceClient
 
 from main_service import PROJECT_ID, BURLA_BACKEND_URL, IN_DEV, GCL_CLIENT
