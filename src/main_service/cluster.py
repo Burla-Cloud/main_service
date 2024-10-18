@@ -12,7 +12,7 @@ from google.cloud.compute_v1 import InstancesClient
 from google.api_core.exceptions import NotFound
 
 from main_service import PROJECT_ID
-from main_service.node import Node, Container, JustifiedDeletion
+from main_service.node import Node, Container
 from main_service.helpers import Logger
 
 
@@ -90,29 +90,9 @@ def reconcile(db: firestore.Client, logger: Logger, add_background_task: Callabl
     # load nodes from db
     nodes = []
     node_not_deleted = FieldFilter("status", "not-in", ["DELETED", "FAILED"])
-    node_doc_refs = db.collection("nodes").where(filter=node_not_deleted).stream()
-    for node_ref in node_doc_refs:
-        node_doc = node_ref.to_dict()
-        containers = [Container.from_dict(c) for c in node_doc.get("containers", [])]
-        node = Node.from_previous_state(
-            db=db,
-            logger=logger,
-            add_background_task=add_background_task,
-            instance_name=node_doc["instance_name"],
-            machine_type=node_doc["machine_type"],
-            containers=containers if node_doc.get("containers") else None,
-            started_booting_at=node_doc["started_booting_at"],
-            finished_booting_at=node_doc["finished_booting_at"],
-            inactivity_shutdown_time_sec=node_doc["inactivity_shutdown_time_sec"],
-            host=node_doc["host"],
-            zone=node_doc["zone"],
-            current_job=node_doc["current_job"],
-            parallelism=node_doc["parallelism"],
-            instance_client=instance_client,
-            delete_when_done=node_doc["delete_when_done"],
-            is_deleting=node_doc["is_deleting"],
-            is_booting=node_doc["is_booting"],
-        )
+    node_doc_snapshots = db.collection("nodes").where(filter=node_not_deleted).stream()
+    for node_snapshot in node_doc_snapshots:
+        node = Node.from_snapshot(db, logger, add_background_task, node_snapshot)
         nodes.append(node)
 
     # Get list of burla nodes from GCE
@@ -150,7 +130,7 @@ def reconcile(db: firestore.Client, logger: Logger, add_background_task: Callabl
         node_not_in_gce = node.instance_name not in names_of_nodes_from_gce
         status = node.status()
 
-        if status in ["READY", "RUNNING", "DELETING"] and node_not_in_gce:
+        if status in ["READY", "RUNNING"] and node_not_in_gce:
             # node in database but not in compute engine?
             db.collection("nodes").document(node.instance_name).update({"status": "DELETED"})
         elif status == "BOOTING" and node_not_in_gce:
@@ -161,7 +141,8 @@ def reconcile(db: firestore.Client, logger: Logger, add_background_task: Callabl
                 msg = f"Deleting node {node.instance_name} because it is not in GCE yet "
                 msg += f"and it started booting {time_since_boot}s ago."
                 logger.log(msg)
-                node.async_delete()
+                node.delete()
+                db.collection("nodes").document(node.instance_name).update({"status": "DELETED"})
                 nodes.remove(node)
         elif status == "RUNNING":
             # job is still active?
@@ -176,7 +157,7 @@ def reconcile(db: firestore.Client, logger: Logger, add_background_task: Callabl
         elif status == "FAILED":
             # Delete node
             logger.log(f"Deleting node: {node.instance_name} because it has FAILED")
-            node.async_delete()
+            node.delete()
             nodes.remove(node)
 
     # 3. Check that the cluster does or will match the specified default configuration.
@@ -191,29 +172,21 @@ def reconcile(db: firestore.Client, logger: Logger, add_background_task: Callabl
             for i in range(node_deficit):
                 containers = [Container.from_dict(c) for c in spec["containers"]]
                 machine = spec["machine_type"]
-                instance_name = f"burla-node-{uuid4().hex}"
-                msg = f"Adding another {machine} ({instance_name})"
-                msg += f"because cluster is {node_deficit-i} short"
-                logger.log(msg)
+                logger.log(f"Adding another {machine} because cluster is {node_deficit-i} short.")
 
-                def add_node(instance_name, machine_type, containers, inactivity_shutdown_time_sec):
-                    try:
-                        Node.start(
-                            db=db,
-                            logger=logger,
-                            add_background_task=add_background_task,
-                            machine_type=machine_type,
-                            instance_name=instance_name,
-                            containers=containers,
-                            inactivity_shutdown_time_sec=inactivity_shutdown_time_sec,
-                        )
-                    except JustifiedDeletion:
-                        # Thrown in Node constructor: Means node was correctly deleted mid-boot.
-                        pass
+                def add_node(machine_type, containers, inactivity_shutdown_time_sec):
+                    Node.start(
+                        db=db,
+                        logger=logger,
+                        add_background_task=add_background_task,
+                        machine_type=machine_type,
+                        containers=containers,
+                        inactivity_shutdown_time_sec=inactivity_shutdown_time_sec,
+                        verbose=True,
+                    )
 
                 add_background_task(
                     add_node,
-                    instance_name,
                     spec["machine_type"],
                     containers,
                     spec.get("inactivity_shutdown_time_sec"),
@@ -229,7 +202,7 @@ def reconcile(db: firestore.Client, logger: Logger, add_background_task: Callabl
                 surplus = len(nodes_to_remove) - i
                 machine = spec["machine_type"]
                 logger.log(f"DELETING an {machine} node because cluster has {surplus} too many")
-                node.async_delete()
+                node.delete()
 
     # record globally that reconciling is done, prevents simoultainous reconciling
     reconcile_marker_ref = db.collection("global_reconcile_marker").document("marker")
@@ -270,7 +243,7 @@ def reconcile(db: firestore.Client, logger: Logger, add_background_task: Callabl
     #         node_is_done = any_failed or job_status["all_subjobs_done"]
 
     #         if node_is_done and node.delete_when_done:
-    #             node.async_delete()
+    #             node.delete()
     #             nodes.remove(node)
     #         elif node_is_done:
     #             add_background_task(reassign_or_remove_node, node)
