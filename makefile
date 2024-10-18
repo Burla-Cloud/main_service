@@ -20,9 +20,6 @@ restart_dev_cluster:
 restart_prod_cluster:
 	curl -X POST -H "Content-Length: 0" https://cluster.burla.dev/v1/cluster/restart
 
-test_node:
-	poetry run python -c "from main_service.node import Node; Node.start('n4-standard-2')"
-
 deploy-test:
 	set -e; \
 	PROJECT_ID=$$(gcloud config get-value project 2>/dev/null); \

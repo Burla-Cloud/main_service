@@ -8,7 +8,6 @@ function watchCluster() {
     let eventSource = new EventSource('/v1/cluster');
     let nodes = {};
 
-    console.log("HERE")
     clusterElement.textContent = "OFF";
     restartButton.textContent = "Start Cluster";
 

@@ -39,8 +39,10 @@ docker pull us-docker.pkg.dev/<YOUR PROJECT HERE>/burla-job-containers/default/i
 """
 
 import os
+import sys
 import json
 import requests
+import traceback
 from dataclasses import dataclass, asdict
 from requests.exceptions import ConnectionError, ConnectTimeout, Timeout
 from time import sleep, time
@@ -49,7 +51,7 @@ from typing import Optional, Callable
 
 from google.api_core.exceptions import NotFound, ServiceUnavailable, Conflict
 from google.cloud import firestore
-from google.cloud.firestore import Increment
+from google.cloud.firestore import DocumentSnapshot
 from google.cloud.compute_v1 import (
     AttachedDisk,
     NetworkInterface,
@@ -65,7 +67,7 @@ from google.cloud.compute_v1 import (
 )
 
 from main_service import PROJECT_ID, IN_PROD
-from main_service.helpers import Logger
+from main_service.helpers import Logger, format_traceback
 
 
 @dataclass
@@ -86,16 +88,6 @@ class Container:
         return asdict(self)
 
 
-class JustifiedDeletion(Exception):
-    # Thrown if node is correctly deleted mid startup
-    pass
-
-
-class UnjustifiedDeletion(Exception):
-    # Thrown if node is incorrectly deleted mid startup
-    pass
-
-
 # This is 100% guessed, is used for unimportant estimates / ranking
 TOTAL_BOOT_TIME = 60
 TOTAL_REBOOT_TIME = 30
@@ -107,109 +99,44 @@ else:
     PROJECT_NUM = os.environ["PROJECT_NUM"]
     GCE_DEFAULT_SVC = f"{PROJECT_NUM}-compute@developer.gserviceaccount.com"
 
-DEFAULT_DISK_IMAGE = "projects/burla-prod/global/images/burla-cluster-node-image-5"
-
-NODE_START_TIMEOUT = 60 * 2
+NODE_BOOT_TIMEOUT = 60 * 3
 NODE_SVC_PORT = "8080"
 ACCEPTABLE_ZONES = ["us-central1-b", "us-central1-c", "us-central1-f", "us-central1-a"]
-NODE_SVC_VERSION = "0.8.4"  # <- this maps to a git tag/release or branch
+NODE_SVC_VERSION = "0.8.5"  # <- this maps to a git tag/release or branch
 
 
 class Node:
-    """
-    TODO: Error not thrown when `start` called with accellerator optimized machine type ??
-    """
 
     def __init__(self):
         # Prevents instantiation of nodes that do not exist.
-        err_msg = "Please use `Node.start`, `Node.start_and_execute`, or `Node.from_previous_state`"
-        raise NotImplementedError(err_msg)
+        raise NotImplementedError("Please use `Node.start`, or `Node.from_snapshot`")
 
     @classmethod
-    def _init(
+    def from_snapshot(
         cls,
         db: firestore.Client,
         logger: Logger,
         add_background_task: Callable,
-        machine_type: str,
-        started_booting_at: int,
-        finished_booting_at: Optional[int] = None,
-        inactivity_shutdown_time_sec: Optional[int] = None,
-        instance_name: Optional[str] = None,
-        containers: Optional[list[Container]] = None,
-        host: Optional[str] = None,
-        zone: Optional[str] = None,
-        current_job: Optional[str] = None,
-        parallelism: Optional[int] = None,
+        node_snapshot: DocumentSnapshot,
         instance_client: Optional[InstancesClient] = None,
-        delete_when_done: bool = False,
-        is_booting=False,
-        is_deleting=False,
     ):
+        node_doc = node_snapshot.to_dict()
         self = cls.__new__(cls)
+        self.node_ref = node_snapshot.reference
         self.db = db
         self.logger = logger
         self.add_background_task = add_background_task
-        self.instance_name = f"burla-node-{uuid4().hex}" if instance_name is None else instance_name
-        self.machine_type = machine_type
-        self.containers = containers
-        self.started_booting_at = started_booting_at
-        self.finished_booting_at = finished_booting_at
-        self.inactivity_shutdown_time_sec = inactivity_shutdown_time_sec
-        self.host = host
-        self.zone = zone
-        self.current_job = current_job
-        self.parallelism = parallelism
-        self.instance_client = instance_client if instance_client else InstancesClient()
-        self.delete_when_done = delete_when_done
-        self.is_deleting = is_deleting
-        self.is_booting = is_booting
-        self._deleted = False
+        self.instance_name = node_doc["instance_name"]
+        self.machine_type = node_doc["machine_type"]
+        self.containers = [Container.from_dict(c) for c in node_doc["containers"]]
+        self.started_booting_at = node_doc["started_booting_at"]
+        self.inactivity_shutdown_time_sec = node_doc["inactivity_shutdown_time_sec"]
+        self.host = node_doc["host"]
+        self.zone = node_doc["zone"]
+        self.current_job = node_doc["current_job"]
+        self.is_booting = node_doc["status"] == "BOOTING"
+        self.instance_client = instance_client
         return self
-
-    @classmethod
-    def from_previous_state(
-        cls,
-        db: firestore.Client,
-        logger: Logger,
-        add_background_task: Callable,
-        instance_name: str,
-        machine_type: str,
-        delete_when_done: bool,
-        containers: Optional[list[Container]] = None,
-        started_booting_at: Optional[int] = None,  # time NODE (NOT VM) started booting
-        finished_booting_at: Optional[int] = None,  # time NODE (NOT VM) finished booting
-        inactivity_shutdown_time_sec: Optional[int] = None,
-        host: Optional[str] = None,
-        zone: Optional[str] = None,
-        current_job: Optional[str] = None,
-        parallelism: Optional[int] = None,
-        instance_client: Optional[InstancesClient] = None,
-        is_deleting=None,
-        is_booting=None,
-    ):
-        if (finished_booting_at is not None) and (not host or not zone):
-            raise ValueError("host and zone required for running nodes")
-
-        return cls._init(
-            db=db,
-            logger=logger,
-            add_background_task=add_background_task,
-            instance_name=instance_name,
-            machine_type=machine_type,
-            containers=containers,
-            started_booting_at=started_booting_at,
-            finished_booting_at=finished_booting_at,
-            inactivity_shutdown_time_sec=inactivity_shutdown_time_sec,
-            delete_when_done=delete_when_done,
-            host=host,
-            zone=zone,
-            current_job=current_job,
-            parallelism=parallelism,
-            instance_client=instance_client,
-            is_deleting=is_deleting,
-            is_booting=is_booting,
-        )
 
     @classmethod
     def start(
@@ -218,26 +145,40 @@ class Node:
         logger: Logger,
         add_background_task: Callable,
         machine_type: str,
-        instance_name: Optional[str] = None,
-        containers: Optional[list[Container]] = None,
-        inactivity_shutdown_time_sec: Optional[int] = None,
-        disk_image: str = DEFAULT_DISK_IMAGE,
-        disk_size: int = 10,  # <- (Gigabytes) minimum is 10 due to disk image
+        containers: list[Container],
         instance_client: Optional[InstancesClient] = None,
+        inactivity_shutdown_time_sec: Optional[int] = None,
+        verbose=False,
+        disk_image: str = "projects/burla-prod/global/images/burla-cluster-node-image-6",
+        disk_size: int = 20,  # <- (Gigabytes) minimum is 10 due to disk image
     ):
-        self = cls._init(
-            db=db,
-            logger=logger,
-            add_background_task=add_background_task,
-            instance_name=instance_name,
-            machine_type=machine_type,
-            containers=containers,
-            inactivity_shutdown_time_sec=inactivity_shutdown_time_sec,
-            started_booting_at=time(),
-            instance_client=instance_client,
-        )
+        self = cls.__new__(cls)
+        self.db = db
+        self.logger = logger
+        self.add_background_task = add_background_task
+        self.machine_type = machine_type
+        self.containers = containers
+        self.inactivity_shutdown_time_sec = inactivity_shutdown_time_sec
+        self.instance_client = instance_client if instance_client else InstancesClient()
+
+        self.instance_name = f"burla-node-{uuid4().hex[:12]}"
+        self.started_booting_at = time()
         self.is_booting = True
-        self.update_state_in_db()
+        self.host = None
+        self.zone = None
+        self.current_job = None
+        self.node_ref = self.db.collection("nodes").document(self.instance_name)
+
+        if verbose:
+            self.logger.log(f"Adding node {self.instance_name} ..")
+
+        current_state = dict(self.__dict__)  # <- create copy to modify / save
+        current_state["status"] = "BOOTING"
+        current_state["containers"] = [container.to_dict() for container in containers]
+        attrs_to_not_save = ["db", "logger", "add_background_task", "instance_client", "node_ref"]
+        current_state = {k: v for k, v in current_state.items() if k not in attrs_to_not_save}
+        self.node_ref.set(current_state)
+
         self.__start(disk_image=disk_image, disk_size=disk_size)
         return self
 
@@ -246,94 +187,42 @@ class Node:
         time_until_booted = TOTAL_BOOT_TIME - time_spent_booting
         return max(0, time_until_booted)
 
-    def update_state_in_db(self):
-        node_ref = self.db.collection("nodes").document(self.instance_name)
-        node = node_ref.get().to_dict()
-        node_previously_deleted = (node or {}).get("deleted_at")
-        node_just_deleted = self._deleted
-        node_is_new = node is None
-
-        current_state = self.to_dict()
-        current_status = current_state["status"]
-
-        if node_previously_deleted:
-            return
-        elif node_just_deleted:
-            current_state["deleted_at"] = time()
-
-        if node_is_new:
-            node_ref.set(current_state)
-            previous_status = current_status
-        else:
-            node_ref.update(current_state)
-            previous_status = node["status"]
-
-        if self.current_job != None:
-            job_ref = self.db.collection("jobs").document(self.current_job)
-            job_is_not_done = not job_ref.get().to_dict().get("ended_at")
-
-            if job_is_not_done and self.parallelism:
-                if previous_status != "RUNNING" and current_status == "RUNNING":
-                    job_ref.update({"current_parallelism": Increment(self.parallelism)})
-                    msg = f"Node {self.instance_name} now working on job {self.current_job}, "
-                    msg += f"parallelism increased by {self.parallelism}"
-                    self.logger.log(msg)
-                elif previous_status == "RUNNING" and current_status != "RUNNING":
-                    job_ref.update({"current_parallelism": Increment(-self.parallelism)})
-                    msg = f"Node {self.instance_name} no longer working on job {self.current_job}, "
-                    msg += f"parallelism decreased by {self.parallelism}"
-                    self.logger.log(msg)
-
-    def to_dict(self):
-        return dict(
-            instance_name=self.instance_name,
-            status=self.status(),
-            host=self.host,
-            zone=self.zone,
-            machine_type=self.machine_type,
-            current_job=self.current_job,
-            parallelism=self.parallelism,
-            containers=[container.to_dict() for container in self.containers] or None,
-            inactivity_shutdown_time_sec=self.inactivity_shutdown_time_sec,
-            delete_when_done=self.delete_when_done,
-            started_booting_at=self.started_booting_at,
-            finished_booting_at=self.finished_booting_at,
-            is_booting=self.is_booting,
-            is_deleting=self.is_deleting,
-            deleted_at=None,
-        )
-
-    def status(self, timeout=1, timeout_remaining=None):
+    def delete(self):
         """
-        Returns one of: `BOOTING`, `RUNNING`, `READY`, `FAILED`, `DELETING`.
+        An `instance_client.delete` request creates an `operation` that runs in the background.
         """
-        start = time()
-        timeout_remaining = timeout if timeout_remaining is None else timeout_remaining
-        has_timed_out = timeout_remaining < 0
-        status = None
+        if not self.instance_client:
+            self.instance_client = InstancesClient()
+
+        try:
+            kwargs = dict(project=PROJECT_ID, zone=self.zone, instance=self.instance_name)
+            self.instance_client.delete(**kwargs)
+        except (NotFound, ValueError):
+            pass  # these errors mean it was already deleted.
+        self.node_ref.update({"status": "DELETED"})
+
+    def status(self):
+        """Returns one of: `BOOTING`, `RUNNING`, `READY`, `FAILED`"""
 
         if self.host is not None:
             try:
-                response = requests.get(f"{self.host}/", timeout=1)
+                response = requests.get(f"{self.host}/", timeout=2)
                 response.raise_for_status()
-                status = response.json()["status"]
+                return response.json()["status"]
             except (ConnectionError, ConnectTimeout, Timeout):
-                pass
-
-        status = "BOOTING" if self.is_booting and status is None else status
-        status = "DELETING" if self.is_deleting else status
-
-        if has_timed_out:
-            # (service theoretically should have started and responded by now)
-            self.logger.log(f"STATUS TIMEOUT after {timeout}s: {self.instance_name} is FAILED")
-            status = "FAILED"
-
-        if status is None:
-            sleep(2)
-            elapsed_time = time() - start
-            return self.status(timeout=timeout, timeout_remaining=timeout_remaining - elapsed_time)
+                if self.is_booting:
+                    return "BOOTING"
+                else:
+                    exc_type, exc_value, exc_traceback = sys.exc_info()
+                    tb_details = traceback.format_exception(exc_type, exc_value, exc_traceback)
+                    traceback_str = format_traceback(tb_details)
+                    msg = f"Node {self.instance_name} has FAILED (no response after 2 sec)."
+                    self.logger.log(msg, severity="ERROR", traceback=traceback_str)
+                    return "FAILED"
+        elif self.is_booting:
+            return "BOOTING"
         else:
-            return status
+            raise Exception("Node not booting but also has no hostname?")
 
     def __start(self, disk_image: str, disk_size: int):
         disk_params = AttachedDiskInitializeParams(source_image=disk_image, disk_size_gb=disk_size)
@@ -370,31 +259,16 @@ class Node:
                 instance_created = True
                 break
 
-            except ServiceUnavailable:  # <- not enough instances in this zone.
+            except ServiceUnavailable:  # <- not enough instances in this zone, try next zone.
                 instance_created = False
-            except Conflict:  # <- means vm was deleted while starting.
-                node = self.db.collection("nodes").document(self.instance_name).get().to_dict()
-                node_is_deleting = (node or {}).get("is_deleting") == True
-                node_was_deleted = (node or {}).get("deleted_at")
-                deletion_is_justified = node and (node_is_deleting or node_was_deleted)
-
-                # when is "deletion justified" ?
-                # sometimes master svc will realize it doesent need a node just after requesting it
-                # example: job needs more parallelism, then finishes before new node is ready
-                if deletion_is_justified:
-                    raise JustifiedDeletion(f"Node {self.instance_name} deleted while starting.")
-                else:
-                    msg = f"UNJUSTIFIED DELETION: Node {self.instance_name} deleted while starting."
-                    raise UnjustifiedDeletion(msg)
+            except Conflict:
+                raise Exception(f"Node {self.instance_name} deleted while starting.")
 
         if not instance_created:
             raise Exception(f"Unable to provision {instance} in any of: {ACCEPTABLE_ZONES}")
 
-        instance = self.instance_client.get(
-            project=PROJECT_ID, zone=zone, instance=self.instance_name
-        )
-        external_ip = instance.network_interfaces[0].access_configs[0].nat_i_p
-
+        kw = dict(project=PROJECT_ID, zone=zone, instance=self.instance_name)
+        external_ip = self.instance_client.get(**kw).network_interfaces[0].access_configs[0].nat_i_p
         self.host = f"http://{external_ip}:{NODE_SVC_PORT}"
         self.zone = zone
 
@@ -402,22 +276,16 @@ class Node:
         status = self.status()
         while status != "READY":
             sleep(1)
-            booting_too_long = (time() - start) > 60 * 3
+            booting_too_long = (time() - start) > NODE_BOOT_TIMEOUT
             status = self.status()
 
             if status == "FAILED" or booting_too_long:
-                try:
-                    kwargs = dict(project=PROJECT_ID, zone=self.zone, instance=self.instance_name)
-                    self.instance_client.delete(**kwargs)
-                except (NotFound, ValueError):
-                    pass
-                self._deleted = True
+                self.delete()
                 msg = f"Node {self.instance_name} Failed to start! (timeout={booting_too_long})"
                 raise Exception(msg)
 
+        self.node_ref.update(dict(host=self.host, zone=self.zone))  # node svc marks itself as ready
         self.is_booting = False
-        self.finished_booting_at = time()
-        self.update_state_in_db()
 
     def __get_startup_script(self):
         return f"""
