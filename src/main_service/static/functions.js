@@ -9,13 +9,14 @@ let clusterElement = null;
 
 function watchCluster() {
     const nodesElement = document.getElementById('monitor-message');
-    clusterElement = document.getElementById('cluster-status');
+    const clusterElement = document.getElementById('cluster-status');
+    const startButton = document.getElementById('start-button');  
 
     // Initialize the EventSource for node statuses
     if (typeof(EventSource) !== "undefined") {
         nodeEventSource = new EventSource('/v1/cluster');
     } else {
-        messageElement.textContent = "Your browser does not support server-sent events.";
+        nodesElement.textContent = "Your browser does not support server-sent events.";  // Fix for messageElement
         return;  // Stop execution if EventSource isn't supported
     }
 
@@ -27,16 +28,19 @@ function watchCluster() {
 
     nodeEventSource.onmessage = function(event) {
         const data = JSON.parse(event.data);
-        const { nodeId, status, deleted } = data;
+        const { nodeId, status, machine, deleted } = data;
 
-        if (status) {
-            nodes[nodeId] = status;
-        } else if (deleted) {
+        console.log(`Received: nodeId=${nodeId}, status=${status}, deleted=${deleted}, machine=${machine}`);
+
+        if (deleted) {
+            // Handle node deletion
             delete nodes[nodeId];
+        } else if (status) {
+            // Handle node status update
+            nodes[nodeId] = { status, machine: machine || "Unknown" };
         }
 
         updateNodesStatus(nodes);
-        // No need to call updateClusterStatus here
     };
 
     nodeEventSource.onerror = function(error) {
@@ -49,9 +53,9 @@ function watchCluster() {
         nodesElement.innerHTML = "";
 
         for (const nodeId in nodes) {
-            const status = nodes[nodeId];
+            const { status, machine } = nodes[nodeId];
             const nodeElement = document.createElement("div");
-            nodeElement.textContent = `Node ${nodeId} is ${status}`;
+            nodeElement.textContent = `${nodeId} | status: ${status} | machine: ${machine}`;
             nodesElement.appendChild(nodeElement);
         }
     }

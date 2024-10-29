@@ -71,12 +71,13 @@ async def cluster_info():
             # Broadcast status updates:
             for node in nodes:
                 instance_name = node["instance_name"]
+                hardware_type = node["machine_type"]
                 current_status = node["status"]
                 previous_status = node_name_to_status.get(instance_name)
 
                 if current_status != previous_status:
                     node_name_to_status[instance_name] = current_status
-                    event_data = dict(nodeId=instance_name, status=current_status)
+                    event_data = dict(nodeId=instance_name, status=current_status, machine=hardware_type)
                     yield f"data: {json.dumps(event_data)}\n\n"
                     print(f"updated status: {event_data}")
 
