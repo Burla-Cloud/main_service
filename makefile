@@ -20,9 +20,6 @@ restart_dev_cluster:
 restart_prod_cluster:
 	curl -X POST -H "Content-Length: 0" https://cluster.burla.dev/v1/cluster/restart
 
-test_node:
-	poetry run python -c "from main_service.node import Node; Node.start('n4-standard-2')"
-
 deploy-test:
 	set -e; \
 	PROJECT_ID=$$(gcloud config get-value project 2>/dev/null); \
@@ -115,6 +112,24 @@ deploy-prod:
 	--timeout 360 \
 	--concurrency 20 \
 	--allow-unauthenticated
+
+deploy-dev-to-prod:
+	set -e; \
+	echo ; \
+	echo This will deploy the current local project DIRECTLY TO PROD!; \
+	echo ARE YOU SURE YOU WANT TO DO THIS?; \
+	echo ; \
+	while true; do \
+		read -p "Do you want to continue? (yes/no): " yn; \
+		case $$yn in \
+			[Yy]* ) echo "Continuing..."; break;; \
+			[Nn]* ) echo "Exiting..."; exit;; \
+			* ) echo "Please answer yes or no.";; \
+		esac; \
+	done; \
+	$(MAKE) image; \
+	$(MAKE) move-test-image-to-prod; \
+	echo "yes" | $(MAKE) deploy-prod
 
 image:
 	set -e; \
