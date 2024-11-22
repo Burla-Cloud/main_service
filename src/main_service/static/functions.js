@@ -1,127 +1,260 @@
-let clusterIsOn = false; // Track cluster status globally
-let eventSource; // Reuse the EventSource globally
+// Global variables to track cluster state and elements
+let nodeEventSource;
+let clusterStatusEventSource;
+let messageElement = null;
+let startButton = null;
+let shutdownButton = null;
+let loaderIntervalId = null;  // For managing the loader interval
+let clusterElement = null;
 
 function watchCluster() {
     const nodesElement = document.getElementById('monitor-message');
     const clusterElement = document.getElementById('cluster-status');
-    const restartButton = document.querySelector('button');
-    let eventSource = new EventSource('/v1/cluster');
+    const startButton = document.getElementById('start-button');  
+
+    // Initialize the EventSource for node statuses
+    if (typeof(EventSource) !== "undefined") {
+        nodeEventSource = new EventSource('/v1/cluster');
+    } else {
+        nodesElement.textContent = "Your browser does not support server-sent events.";  // Fix for messageElement
+        return;  // Stop execution if EventSource isn't supported
+    }
+
     let nodes = {};
 
+    console.log("Initializing node status monitoring");
     clusterElement.textContent = "OFF";
-    restartButton.textContent = "Start Cluster";
+    startButton.textContent = "Start Cluster";
 
-    eventSource.onmessage = function(event) {
+    nodeEventSource.onmessage = function(event) {
         const data = JSON.parse(event.data);
-        const { nodeId, status, deleted } = data;
+        const { nodeId, status, machine, deleted } = data;
 
-        if (status) {
-            nodes[nodeId] = status;
-        } else if (deleted) {
+        console.log(`Received: nodeId=${nodeId}, status=${status}, deleted=${deleted}, machine=${machine}`);
+
+        if (deleted) {
+            // Handle node deletion
             delete nodes[nodeId];
+        } else if (status) {
+            // Handle node status update
+            nodes[nodeId] = { status, machine: machine || "Unknown" };
         }
-        
+
         updateNodesStatus(nodes);
-        updateClusterStatus(nodes, restartButton);
     };
 
-    eventSource.onerror = function(error) {
+    nodeEventSource.onerror = function(error) {
         nodesElement.innerHTML = "";
-        nodesElement.textContent = "Error: Unable to receive updates.";
-        eventSource.close();
+        nodesElement.textContent = "Error: Unable to receive node updates.";
+        nodeEventSource.close();
     };
 
     function updateNodesStatus(nodes) {
         nodesElement.innerHTML = "";
 
         for (const nodeId in nodes) {
-            const status = nodes[nodeId];
+            const { status, machine } = nodes[nodeId];
             const nodeElement = document.createElement("div");
-            nodeElement.textContent = `Node ${nodeId} is ${status}`;
+            nodeElement.textContent = `${nodeId} | status: ${status} | machine: ${machine}`;
             nodesElement.appendChild(nodeElement);
-        }
-    }
-
-    function updateClusterStatus(nodes, restartButton) {
-        const nodeStatuses = Object.values(nodes);
-
-        if (nodeStatuses.length === 0) {
-            clusterElement.textContent = "OFF";
-            restartButton.textContent = "Start Cluster";
-
-        } else if (nodeStatuses.includes("BOOTING")) {
-            clusterElement.textContent = "BOOTING";
-            restartButton.textContent = "Restart Cluster";
-
-        } else if (nodeStatuses.every(status => status === "READY")) {
-            clusterElement.textContent = "ON";
-            restartButton.textContent = "Restart Cluster";
         }
     }
 }
 
-function startCluster() {
-    const restartButton = document.querySelector('button');
-    const messageElement = document.getElementById('response-message');
+function watchClusterStatus() {
+    clusterElement = document.getElementById('cluster-status');
 
-    // Clear any previous message or loader
-    messageElement.textContent = '';
-    
-    // Reset the message color to default (black or your preferred color)
+    function createEventSource() {
+        console.log("Creating new EventSource connection...");
+        
+        let source = new EventSource('/v1/cluster/status');
+        
+        source.onmessage = function(event) {
+            const data = JSON.parse(event.data);
+            const status = data.status;
+            updateClusterStatus(status);
+        };
+        
+        source.onerror = function(error) {
+            console.error("Error receiving cluster status updates.", error);
+            source.close();  // Close the connection to prevent memory leaks or issues.
+            // Retry connection after 2 seconds
+            setTimeout(createEventSource, 2000);
+        };
+    }
+
+    createEventSource();  // Initial connection
+}
+
+
+function updateClusterStatus(status) {
+    console.log(`Received cluster status: ${status}`);
+    clusterElement.textContent = status;
+
+    if (status === "OFF") {
+        // Cluster is OFF
+        console.log("Cluster is OFF");
+        startButton.textContent = "Start Cluster";
+        // Stop loader if running
+        stopLoader();
+        // Adjust button states
+        startButton.disabled = false;
+        shutdownButton.disabled = true;
+    } else if (status === "BOOTING") {
+        // Cluster is BOOTING
+        console.log("Cluster is BOOTING");
+        startButton.textContent = "Restart Cluster";
+        // Start loader if not running
+        if (!loaderIntervalId) {
+            startLoader('Loading');
+        }
+        // Disable both buttons during booting
+        startButton.disabled = true;
+        shutdownButton.disabled = true;
+    } else if (status === "ON") {
+        // Cluster is ON
+        console.log("Cluster is ON");
+        startButton.textContent = "Restart Cluster";
+        // Stop loader if running
+        stopLoader();
+        // Adjust button states
+        startButton.disabled = false;
+        shutdownButton.disabled = false;
+    } else if (status === "SHUTTING DOWN") {
+        // Cluster is SHUTTING DOWN
+        console.log("Cluster is SHUTTING DOWN");
+        // Start loader if not running
+        if (!loaderIntervalId) {
+            startLoader('Loading');
+        }
+        // Disable both buttons during shutdown
+        startButton.disabled = true;
+        shutdownButton.disabled = true;
+    } else if (status === "ERROR") {
+        // Cluster encountered an error
+        console.log("Cluster encountered an ERROR");
+        // Stop loader if running
+        stopLoader();
+        // Display error message
+        messageElement.textContent = 'Cluster encountered an error.';
+        messageElement.style.color = 'red';
+        // Adjust button states
+        startButton.disabled = false;
+        shutdownButton.disabled = true;
+    }
+}
+
+function startLoader(baseMessage) {
     messageElement.style.color = "black";
 
-    // Display the "Cluster starting up" message and the loader
-    const loaderMessage = document.createElement('span');
-    loaderMessage.textContent = 'Loading';
-    const loader = document.createElement('span');
-    loader.className = 'loader';
-    loader.textContent = ' / '; // Initial loader symbol
+    const loaderSymbols = ['/', '-', '\\', '|'];
+    let loaderIndex = 0;
 
-    // Append the loader to the message element
-    messageElement.appendChild(loaderMessage);
-    messageElement.appendChild(loader);
+    function updateLoader() {
+        messageElement.textContent = `${baseMessage}\u00A0\u00A0${loaderSymbols[loaderIndex]}`;
+        loaderIndex = (loaderIndex + 1) % loaderSymbols.length;
+    }
 
-    // Animate the loader
-    const symbols = ['/', '-', '\\', '|'];
-    let index = 0;
-    const intervalId = setInterval(() => {
-        loader.textContent = symbols[index];
-        index = (index + 1) % symbols.length;
-    }, 140);
+    updateLoader();
+    if (!loaderIntervalId) {
+        loaderIntervalId = setInterval(updateLoader, 154);
+    }
+}
+
+function stopLoader() {
+    if (loaderIntervalId) {
+        clearInterval(loaderIntervalId);
+        loaderIntervalId = null;
+        messageElement.textContent = '';  // Clear the message
+        console.log("Loader stopped.");
+    }
+}
+
+function startCluster() {
+    // Clear any previous message
+    messageElement.textContent = '';
+    messageElement.style.color = "black";
+
+    // Disable the start button and shutdown button
+    startButton.disabled = true;
+    shutdownButton.disabled = true;
 
     const isLocalhost = window.location.hostname === 'localhost';
-    const baseUrl = isLocalhost 
+    const baseUrl = isLocalhost
         ? 'http://localhost:5001'  // Development environment
         : 'https://cluster.burla.dev';  // Production environment
 
     // Call the cluster start API
     fetch(`${baseUrl}/v1/cluster/restart`, { method: 'POST' })
         .then(response => {
-            if (response.ok) {
-                // If the response is OK, do nothing further
-                return;
-            } else {
+            if (!response.ok) {
                 return response.json().then(err => {
                     throw new Error(`Cluster Failed - ${response.status} ${response.statusText}`);
                 });
             }
         })
         .catch(error => {
-            // Display the error message if the response is not OK
+            // Display the error message
             messageElement.textContent = `Error: ${error.message}`;
             messageElement.style.color = "red";
+            // Re-enable buttons
+            startButton.disabled = false;
+            shutdownButton.disabled = false;
+            // Stop loader if it's running
+            stopLoader();
+        });
+}
+
+function shutdownCluster() {
+    // Clear any previous message
+    messageElement.textContent = '';
+    messageElement.style.color = "black";
+
+    // Disable both buttons
+    shutdownButton.disabled = true;
+    startButton.disabled = true;
+
+    const isLocalhost = window.location.hostname === 'localhost';
+    const baseUrl = isLocalhost
+        ? 'http://localhost:5001'  // Development environment
+        : 'https://cluster.burla.dev';  // Production environment
+
+    // Send the shutdown request
+    fetch(`${baseUrl}/v1/cluster/shutdown`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+    })
+        .then(response => {
+            if (!response.ok) {
+                return response.json().then(err => {
+                    throw new Error(`Failed to shut down cluster - ${response.status} ${response.statusText}`);
+                });
+            }
         })
-        .finally(() => {
-            // Add a 1-second delay before stopping the loader
-            setTimeout(() => {
-                clearInterval(intervalId);  // Stop the loader animation
-                loader.remove();
-                loaderMessage.remove();
-                restartButton.disabled = false; // Re-enable the button
-            }, 800);  // 1-second delay
+        .catch(error => {
+            console.error('Error shutting down cluster:', error);
+            messageElement.textContent = `Error: ${error.message}`;
+            messageElement.style.color = "red";
+            // Re-enable buttons
+            shutdownButton.disabled = false;
+            startButton.disabled = false;
+            // Stop loader if it's running
+            stopLoader();
         });
 }
 
 window.onload = function() {
+    // Initialize global elements
+    messageElement = document.getElementById('response-message');
+    startButton = document.getElementById('start-button');
+    shutdownButton = document.getElementById('shutdown-button');
+    clusterElement = document.getElementById('cluster-status');
+
+    // Disable the shutdown button initially
+    shutdownButton.disabled = true;
+
     watchCluster();
+    watchClusterStatus();
 };

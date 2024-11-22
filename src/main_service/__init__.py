@@ -23,7 +23,8 @@ IN_DEV = os.environ.get("IN_DEV") == "True"
 IN_PROD = os.environ.get("IN_PROD") == "True"
 assert not (IN_DEV and IN_PROD)
 
-PROJECT_ID = "burla-prod" if IN_PROD else os.environ.get("PROJECT_ID")
+PROJECT_ID = "burla-prod" if IN_PROD else 'burla-test-joe'
+JOBS_BUCKET = f"burla-jobs--{PROJECT_ID}"
 JOB_ENV_REPO = f"us-docker.pkg.dev/{PROJECT_ID}/burla-job-containers/default"
 BURLA_BACKEND_URL = "https://backend.burla.dev"
 
@@ -118,7 +119,7 @@ async def login__log_and_time_requests__log_errors(request: Request, call_next):
     start = time()
     request.state.uuid = uuid4().hex
 
-    public_endpoints = ["/", "/favicon.ico", "/v1/cluster", "/v1/cluster/restart"]
+    public_endpoints = ["/", "/favicon.ico", "/v1/cluster/shutdown-status", "/v1/cluster", "/v1/cluster/restart", "/v1/cluster/shutdown", "/v1/cluster/status"]
     requesting_public_endpoint = request.url.path in public_endpoints
     requesting_static_file = request.url.path.startswith("/static")
     request_requires_auth = not (requesting_public_endpoint or requesting_static_file)
