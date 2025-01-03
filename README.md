@@ -1,3 +1,8 @@
+### The repository for this service has been moved into the [Burla](https://github.com/Burla-Cloud/burla) GitHub repo.
+
+It can be found in the `main_service` folder in the top-level directory.  
+This was done only to reduce cycle time. Making one github release is faster and simpler than making 4.
+
 #### Main Service
 
 This is a component of the open-source cluster compute software [Burla](https://github.com/Burla-Cloud/burla).
